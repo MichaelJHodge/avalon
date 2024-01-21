@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 ckb-sdk = "3.0.1"
-clap = "4.4.18"
+clap = {version = "4.4.18", features = [ "derive"]}
 futures = "0.3.30"
-libp2p = "0.53.2"
-tokio = "1.35.1"
+libp2p = {version = "0.53.2", features = ["full", "identity", "kad", "json", "secp256k1", "ping", "mdns", "serde", "tcp", "tokio", "gossipsub"]}
+tokio = { version = "1.35.1", features = ["full", "macros"]}

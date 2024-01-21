@@ -17,3 +17,7 @@ Avalon is a decentralized limit order network built on the Nervos CKB blockchain
 ## Building
 
 ## Usage
+
+## License
+
+Avalon is open-source software licensed under the [MIT License](LICENSE).
