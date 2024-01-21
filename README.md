@@ -1,6 +1,6 @@
 # Avalon
 
-Avalon is a decentralized limit order network built on the Nervos CKB blockchain, providing a seamless and secure platform for peer-to-peer token trading. The project leverages libp2p for a robust peer-to-peer networking infrastructure, allowing users to create, share, and fulfill limit orders without relying on a centralized exchange.
+Avalon is a decentralized limit order network built on the Nervos CKB blockchain, providing a seamless and secure peer-to-peer platform. The project leverages libp2p for a robust peer-to-peer networking infrastructure, allowing users to create, share, and fulfill limit orders without relying on a centralized exchange.
 
 ## Features
 
