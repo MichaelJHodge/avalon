@@ -10,7 +10,7 @@ use tracing_subscriber::EnvFilter;
 //The Swarm is the main entry point to the libp2p stack.
 //It is the object that you will interact with most of the time.
 
-//With the Swarm in place, we can lsiten for incoming connections and dial other peers if necessary.
+//With the Swarm in place, we can listen for incoming connections and dial other peers if necessary.
 //We can also send and receive data from other peers.
 //The Swarm is generic over the Transport and NetworkBehaviour traits.
 //This means that we can use any transport and any network behaviour we want.

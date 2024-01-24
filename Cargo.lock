@@ -497,10 +497,14 @@ dependencies = [
  "async-std",
  "ckb-sdk",
  "clap",
+ "either",
  "futures",
  "libp2p",
+ "serde",
  "tokio",
+ "tracing",
  "tracing-subscriber",
+ "void",
 ]
 
 [[package]]
