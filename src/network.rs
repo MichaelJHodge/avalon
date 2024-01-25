@@ -251,6 +251,7 @@ impl EventLoop {
     //Handling various swarm events.
     async fn handle_event(&mut self, event: SwarmEvent<BehaviourEvent>) {
         match event {
+            //Handling Kademlia events related to outbound queries.
             SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
                 kad::Event::OutboundQueryProgressed {
                     id,
@@ -258,12 +259,15 @@ impl EventLoop {
                     ..
                 },
             )) => {
+                //When a StartProviding query completes, notify the corresponding sender.
+
                 let sender: oneshot::Sender<()> = self
                     .pending_start_providing
                     .remove(&id)
                     .expect("Completed query to be previously pending.");
-                let _ = sender.send(());
+                let _ = sender.send(()); //Sending cempletion notification.
             }
+            //More Kademlia events for finding providers of a file.
             SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
                 kad::Event::OutboundQueryProgressed {
                     id,
@@ -275,10 +279,11 @@ impl EventLoop {
                     ..
                 },
             )) => {
+                //When a GetProviders query completes, notify the corresponding sender.
                 if let Some(sender) = self.pending_get_providers.remove(&id) {
                     sender.send(providers).expect("Receiver not to be dropped");
 
-                    // Finish the query. We are only interested in the first result.
+                    // Finish the query. We are only interested in the first result (ie the first set of providers).
                     self.swarm
                         .behaviour_mut()
                         .kademlia
@@ -287,6 +292,7 @@ impl EventLoop {
                         .finish();
                 }
             }
+            //Handling other Kademlia events and request-response protocol events.
             SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
                 kad::Event::OutboundQueryProgressed {
                     result:
@@ -297,6 +303,7 @@ impl EventLoop {
                 },
             )) => {}
             SwarmEvent::Behaviour(BehaviourEvent::Kademlia(_)) => {}
+
             SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
                 request_response::Event::Message { message, .. },
             )) => match message {
@@ -336,24 +343,30 @@ impl EventLoop {
             SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
                 request_response::Event::ResponseSent { .. },
             )) => {}
+
             SwarmEvent::NewListenAddr { address, .. } => {
+                //Logging the new listen address of the local node.
                 let local_peer_id = *self.swarm.local_peer_id();
                 eprintln!(
                     "Local node is listening on {:?}",
                     address.with(Protocol::P2p(local_peer_id))
                 );
             }
+            //Handling more connection-related events
             SwarmEvent::IncomingConnection { .. } => {}
             SwarmEvent::ConnectionEstablished {
                 peer_id, endpoint, ..
             } => {
+                //Handling a successfully established connection.
                 if endpoint.is_dialer() {
+                    //If the local node initiated the connection, notify the corresponding sender.
                     if let Some(sender) = self.pending_dial.remove(&peer_id) {
                         let _ = sender.send(Ok(()));
                     }
                 }
             }
             SwarmEvent::ConnectionClosed { .. } => {}
+
             SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
                 if let Some(peer_id) = peer_id {
                     if let Some(sender) = self.pending_dial.remove(&peer_id) {
@@ -373,35 +386,42 @@ impl EventLoop {
     //Handling various network commands sent to the event loop.
     async fn handle_command(&mut self, command: Command) {
         match command {
+            //Handling command to start listening for incoming connections.
             Command::StartListening { addr, sender } => {
+                //Attempt to listen on the given address .
                 let _ = match self.swarm.listen_on(addr) {
-                    Ok(_) => sender.send(Ok(())),
-                    Err(e) => sender.send(Err(Box::new(e))),
+                    Ok(_) => sender.send(Ok(())),            //Notify success
+                    Err(e) => sender.send(Err(Box::new(e))), //Notify error
                 };
             }
+            //Handling command to dial/connect to a peer.
             Command::Dial {
                 peer_id,
                 peer_addr,
                 sender,
             } => {
+                //If the peer is not already being dialed, dial the peer and instiate a connection.
                 if let hash_map::Entry::Vacant(e) = self.pending_dial.entry(peer_id) {
+                    //Adding peer address to Kademlia DHT and attempting to dial the peer.
                     self.swarm
                         .behaviour_mut()
                         .kademlia
                         .add_address(&peer_id, peer_addr.clone());
                     match self.swarm.dial(peer_addr.with(Protocol::P2p(peer_id))) {
                         Ok(()) => {
-                            e.insert(sender);
+                            e.insert(sender); //Storing the sender for notifying the caller of the result.
                         }
                         Err(e) => {
-                            let _ = sender.send(Err(Box::new(e)));
+                            let _ = sender.send(Err(Box::new(e))); //Notify error if dial fails
                         }
                     }
                 } else {
-                    todo!("Already dialing peer.");
+                    todo!("Already dialing peer."); //Placeholder: Handle already dialing peer.
                 }
             }
+            //Handling command to start providing a file.
             Command::StartProviding { file_name, sender } => {
+                //Initiate providing the file through Kademlia DHT.
                 let query_id = self
                     .swarm
                     .behaviour_mut()
@@ -410,6 +430,10 @@ impl EventLoop {
                     .expect("No store error.");
                 self.pending_start_providing.insert(query_id, sender);
             }
+            //Handling command to get providers of a file.
+            //This is a query to the Kademlia DHT.
+            //The result is returned through the sender.
+            //The sender is stored in a map for later retrieval.
             Command::GetProviders { file_name, sender } => {
                 let query_id = self
                     .swarm
@@ -418,6 +442,10 @@ impl EventLoop {
                     .get_providers(file_name.into_bytes().into());
                 self.pending_get_providers.insert(query_id, sender);
             }
+            //Handling command to request a file from a peer.
+            //This is a request-response operation.
+            //The result is returned through the sender.
+            //The sender is stored in a map for later retrieval.
             Command::RequestFile {
                 file_name,
                 peer,
@@ -430,6 +458,12 @@ impl EventLoop {
                     .send_request(&peer, FileRequest(file_name));
                 self.pending_request_file.insert(request_id, sender);
             }
+            //Handling command to respond to a file request.
+            //This is a request-response operation.
+            //The response is sent through the channel.
+            //The channel is provided by the request-response protocol.
+            //The channel is stored in a map for later retrieval.
+            //The request-response protocol handles the rest of the operation.
             Command::RespondFile { file, channel } => {
                 self.swarm
                     .behaviour_mut()
