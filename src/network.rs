@@ -1,21 +1,28 @@
-use futures::channel::{mpsc, oneshot};
-use futures::prelude::*;
+// The network module - responsible for setting up and managing the P2P network.
+use futures::channel::{mpsc, oneshot}; // Asynchronous channels for communication.
+use futures::prelude::*; // Importing futures utilities for async operations.
 
+// Importing necessary components from libp2p.
 use libp2p::{
-    core::Multiaddr,
-    identity, kad,
-    multiaddr::Protocol,
-    noise,
-    request_response::{self, OutboundRequestId, ProtocolSupport, ResponseChannel},
-    swarm::{NetworkBehaviour, Swarm, SwarmEvent},
-    tcp, yamux, PeerId,
+    core::Multiaddr,     // Multiaddress for network addresses.
+    identity,            // For generating identity keys.
+    kad,                 // Kademlia DHT for peer discovery and content distribution.
+    multiaddr::Protocol, // Networking protocols.
+    noise,               // Noise protocol for encryption.
+    request_response::{self, OutboundRequestId, ProtocolSupport, ResponseChannel}, // For request-response communication pattern.
+    swarm::{NetworkBehaviour, Swarm, SwarmEvent}, // Core libp2p components for networking.
+    tcp,
+    yamux,
+    PeerId, // TCP protocol, yamux for multiplexing, and PeerId type.
 };
 
-use libp2p::StreamProtocol;
-use serde::{Deserialize, Serialize};
-use std::collections::{hash_map, HashMap, HashSet};
-use std::error::Error;
-use std::time::Duration;
+use libp2p::StreamProtocol; // Protocol for streaming data.
+use serde::{Deserialize, Serialize}; // For serializing and deserializing data.
+use std::collections::{hash_map, HashMap, HashSet}; // Standard collections.
+use std::error::Error; // Error handling.
+use std::time::Duration; // For specifying durations.
+
+//Defines the network architecture, behaviors, and client interface for managing peer-to-peer interactions.
 
 /// Creates the network components, namely:
 ///
@@ -25,10 +32,13 @@ use std::time::Duration;
 /// - The network event stream, e.g. for incoming requests.
 ///
 /// - The network task driving the network itself.
+///
+
+//function to create and initialize the network components.
 pub(crate) async fn new(
-    secret_key_seed: Option<u8>,
+    secret_key_seed: Option<u8>, // Optional seed for deterministic key generation.
 ) -> Result<(Client, impl Stream<Item = Event>, EventLoop), Box<dyn Error>> {
-    // Create a public/private key pair, either random or based on a seed.
+    // Create a public/private key pair, either random or based on a seed, for node identity.
     let id_keys = match secret_key_seed {
         Some(seed) => {
             let mut bytes = [0u8; 32];
@@ -37,8 +47,10 @@ pub(crate) async fn new(
         }
         None => identity::Keypair::generate_ed25519(),
     };
+    //Convert public key to peer ID.
     let peer_id = id_keys.public().to_peer_id();
 
+    //Building the libp2p swarm.
     let mut swarm = libp2p::SwarmBuilder::with_existing_identity(id_keys)
         .with_async_std()
         .with_tcp(
@@ -47,10 +59,12 @@ pub(crate) async fn new(
             yamux::Config::default,
         )?
         .with_behaviour(|key| Behaviour {
+            //Setting up the Kademlia DHT for peer dsicovery and content distribution.
             kademlia: kad::Behaviour::new(
                 peer_id,
                 kad::store::MemoryStore::new(key.public().to_peer_id()),
             ),
+            //Setting up the request-response protocol for file exchange.
             request_response: request_response::cbor::Behaviour::new(
                 [(
                     StreamProtocol::new("/file-exchange/1"),
@@ -65,11 +79,13 @@ pub(crate) async fn new(
     swarm
         .behaviour_mut()
         .kademlia
-        .set_mode(Some(kad::Mode::Server));
+        .set_mode(Some(kad::Mode::Server)); // Setting the Kademlia DHT to server mode.
 
+    //Channels for command and event communication.
     let (command_sender, command_receiver) = mpsc::channel(0);
     let (event_sender, event_receiver) = mpsc::channel(0);
 
+    //Returning the network client, event receiver, and event loop.
     Ok((
         Client {
             sender: command_sender,
@@ -79,16 +95,17 @@ pub(crate) async fn new(
     ))
 }
 
+//The Client struct provides a simple interface for interacting with the network layer.
 #[derive(Clone)]
 pub(crate) struct Client {
-    sender: mpsc::Sender<Command>,
+    sender: mpsc::Sender<Command>, //sender for sending commands to the network.
 }
 
 impl Client {
     /// Listen for incoming connections on the given address.
     pub(crate) async fn start_listening(
-        &mut self,
-        addr: Multiaddr,
+        &mut self,       //mutably borrow the client.
+        addr: Multiaddr, //network address to listen on.
     ) -> Result<(), Box<dyn Error + Send>> {
         let (sender, receiver) = oneshot::channel();
         self.sender
@@ -98,12 +115,13 @@ impl Client {
         receiver.await.expect("Sender not to be dropped.")
     }
 
-    /// Dial the given peer at the given address.
+    /// Function to dial the given peer at the given address.
     pub(crate) async fn dial(
-        &mut self,
-        peer_id: PeerId,
-        peer_addr: Multiaddr,
+        &mut self,            //mutably borrow the client.
+        peer_id: PeerId,      //ID of the peer to connect to.
+        peer_addr: Multiaddr, // Address of the peer to connect to.
     ) -> Result<(), Box<dyn Error + Send>> {
+        //Similar pattern as start_listening in that we send a command to the network and wait for the response.
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Command::Dial {
@@ -118,6 +136,8 @@ impl Client {
 
     /// Advertise the local node as the provider of the given file on the DHT.
     pub(crate) async fn start_providing(&mut self, file_name: String) {
+        //Similar pattern as start_listening in that we send a command to the network and wait for the response.
+
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Command::StartProviding { file_name, sender })
@@ -128,6 +148,8 @@ impl Client {
 
     /// Find the providers for the given file on the DHT.
     pub(crate) async fn get_providers(&mut self, file_name: String) -> HashSet<PeerId> {
+        //Similar pattern as start_listening in that we send a command to the network and wait for the response.
+
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Command::GetProviders { file_name, sender })
@@ -139,9 +161,11 @@ impl Client {
     /// Request the content of the given file from the given peer.
     pub(crate) async fn request_file(
         &mut self,
-        peer: PeerId,
-        file_name: String,
+        peer: PeerId,      //The peer to request the file from.
+        file_name: String, //The name of the file to request.
     ) -> Result<Vec<u8>, Box<dyn Error + Send>> {
+        //Similar pattern as start_listening in that we send a command to the network and wait for the response.
+
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Command::RequestFile {
@@ -157,9 +181,11 @@ impl Client {
     /// Respond with the provided file content to the given request.
     pub(crate) async fn respond_file(
         &mut self,
-        file: Vec<u8>,
-        channel: ResponseChannel<FileResponse>,
+        file: Vec<u8>, //The file content to send. This is a vector of bytes.
+        channel: ResponseChannel<FileResponse>, //The channel to send the response on.
     ) {
+        //Similar pattern as start_listening in that we send a command to the network and wait for the response.
+
         self.sender
             .send(Command::RespondFile { file, channel })
             .await
@@ -167,27 +193,35 @@ impl Client {
     }
 }
 
+//Event loop struct manages the network's event loop.
 pub(crate) struct EventLoop {
-    swarm: Swarm<Behaviour>,
-    command_receiver: mpsc::Receiver<Command>,
-    event_sender: mpsc::Sender<Event>,
-    pending_dial: HashMap<PeerId, oneshot::Sender<Result<(), Box<dyn Error + Send>>>>,
-    pending_start_providing: HashMap<kad::QueryId, oneshot::Sender<()>>,
-    pending_get_providers: HashMap<kad::QueryId, oneshot::Sender<HashSet<PeerId>>>,
+    swarm: Swarm<Behaviour>, // The libp2p Swarm managing network behaviors.
+    command_receiver: mpsc::Receiver<Command>, // Receiver for network commands.
+    event_sender: mpsc::Sender<Event>, // Sender for network events.
+    // Maps and hashes for tracking various network operations.
+    pending_dial: HashMap<PeerId, oneshot::Sender<Result<(), Box<dyn Error + Send>>>>, // Pending dial operations.
+    pending_start_providing: HashMap<kad::QueryId, oneshot::Sender<()>>, // Pending start providing operations.
+    pending_get_providers: HashMap<kad::QueryId, oneshot::Sender<HashSet<PeerId>>>, // Pending get providers operations.
     pending_request_file:
-        HashMap<OutboundRequestId, oneshot::Sender<Result<Vec<u8>, Box<dyn Error + Send>>>>,
+        HashMap<OutboundRequestId, oneshot::Sender<Result<Vec<u8>, Box<dyn Error + Send>>>>, // Pending request file operations.
 }
 
+//Implementation of the event loop.
 impl EventLoop {
+    //The new function initializes the event loop.
+    // It takes the libp2p Swarm, command receiver, and event sender as arguments.
+    // It returns the event loop.
+
     fn new(
-        swarm: Swarm<Behaviour>,
-        command_receiver: mpsc::Receiver<Command>,
-        event_sender: mpsc::Sender<Event>,
+        swarm: Swarm<Behaviour>,                   // The libp2p Swarm.
+        command_receiver: mpsc::Receiver<Command>, // Command receiver.
+        event_sender: mpsc::Sender<Event>,         // Event sender.
     ) -> Self {
         Self {
             swarm,
             command_receiver,
             event_sender,
+            // Initialize the maps and hashes.
             pending_dial: Default::default(),
             pending_start_providing: Default::default(),
             pending_get_providers: Default::default(),
@@ -195,8 +229,14 @@ impl EventLoop {
         }
     }
 
+    // The run function drives the network event loop.
     pub(crate) async fn run(mut self) {
         loop {
+            //Selecting between swarm events and command reception. (This is a common pattern in async Rust.)
+            //The select! macro allows us to wait for multiple futures at the same time.
+            //It returns the first future that completes.
+            //The futures::select! macro is similar to the match statement, but instead of matching on values, it matches on futures.
+
             futures::select! {
                 event = self.swarm.next() => self.handle_event(event.expect("Swarm stream to be infinite.")).await  ,
                 command = self.command_receiver.next() => match command {
@@ -208,6 +248,7 @@ impl EventLoop {
         }
     }
 
+    //Handling various swarm events.
     async fn handle_event(&mut self, event: SwarmEvent<BehaviourEvent>) {
         match event {
             SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
@@ -329,6 +370,7 @@ impl EventLoop {
         }
     }
 
+    //Handling various network commands sent to the event loop.
     async fn handle_command(&mut self, command: Command) {
         match command {
             Command::StartListening { addr, sender } => {
@@ -399,14 +441,17 @@ impl EventLoop {
     }
 }
 
+//Defining the network behavior combining multiple libp2p protocols.
 #[derive(NetworkBehaviour)]
 struct Behaviour {
     request_response: request_response::cbor::Behaviour<FileRequest, FileResponse>,
     kademlia: kad::Behaviour<kad::store::MemoryStore>,
 }
 
+//Enum defining possible commands
 #[derive(Debug)]
 enum Command {
+    // Different types of commands for network operations.
     StartListening {
         addr: Multiaddr,
         sender: oneshot::Sender<Result<(), Box<dyn Error + Send>>>,
@@ -435,6 +480,8 @@ enum Command {
     },
 }
 
+//Enum for different types of events that can be emitted.
+
 #[derive(Debug)]
 pub(crate) enum Event {
     InboundRequest {
@@ -444,6 +491,10 @@ pub(crate) enum Event {
 }
 
 // Simple file exchange protocol
+// The request-response protocol is used for file exchange.
+// The request is the file name, and the response is the file content.
+// The request-response protocol is a generic protocol that can be used for any type of request and response.
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct FileRequest(String);
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
