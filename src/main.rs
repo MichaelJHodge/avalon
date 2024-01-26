@@ -120,7 +120,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 #[derive(Parser, Debug)]
-#[clap(name = "libp2p file sharing")]
+#[clap(name = "avalon")]
 /// Represents the command line options for the program.
 struct Opt {
     /// Fixed value to generate deterministic peer ID.
