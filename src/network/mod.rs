@@ -52,6 +52,7 @@ pub(crate) async fn new(
 
     //Building the libp2p swarm.
     let mut swarm = libp2p::SwarmBuilder::with_existing_identity(id_keys)
+        // .with_tokio()
         .with_async_std()
         .with_tcp(
             tcp::Config::default(),
@@ -66,10 +67,7 @@ pub(crate) async fn new(
             ),
             //Setting up the request-response protocol for file exchange.
             request_response: request_response::cbor::Behaviour::new(
-                [(
-                    StreamProtocol::new("/file-exchange/1"),
-                    ProtocolSupport::Full,
-                )],
+                [(StreamProtocol::new("/avalon/kad/1"), ProtocolSupport::Full)],
                 request_response::Config::default(),
             ),
         })?
