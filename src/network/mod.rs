@@ -418,6 +418,33 @@ impl EventLoop {
                     todo!("Already dialing peer."); //Placeholder: Handle already dialing peer.
                 }
             }
+
+            Command::ProvideOrder {
+                order_details,
+                sender,
+            } => {
+                //Initiate providing the order through Kademlia DHT.
+                let query_id = self
+                    .swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .start_providing(order_details.into_bytes().into())
+                    .expect("No store error.");
+                self.pending_start_providing.insert(query_id, sender);
+            }
+            Command::ReceiveOrder {
+                order_details,
+                sender,
+            } => {
+                //Initiate receiving the order through Kademlia DHT.
+                let query_id = self
+                    .swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .start_providing(order_details.into_bytes().into())
+                    .expect("No store error.");
+                self.pending_start_providing.insert(query_id, sender);
+            }
             //Handling command to start providing a file.
             Command::StartProviding { file_name, sender } => {
                 //Initiate providing the file through Kademlia DHT.
@@ -499,6 +526,10 @@ enum Command {
         sender: oneshot::Sender<()>,
     },
     ProvideOrder {
+        order_details: String,
+        sender: oneshot::Sender<()>,
+    },
+    ReceiveOrder {
         order_details: String,
         sender: oneshot::Sender<()>,
     },

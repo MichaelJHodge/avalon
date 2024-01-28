@@ -67,10 +67,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     match opt.argument {
         //Provide an order and propogate it to other peers
-        CliArgument::ProvideOrder { order_details } => {
-            // Process order details and add to local order book
-            // Send order to other peers or respond to incoming order requests
-        }
+        CliArgument::ProvideOrder { order_details } => {}
+        //Rceive an order
+        CliArgument::ReceiveOrder { order_details } => {}
     }
 
     Ok(())
@@ -105,14 +104,8 @@ enum CliArgument {
         #[clap(long)]
         order_details: String,
     },
-    Provide {
+    ReceiveOrder {
         #[clap(long)]
-        path: PathBuf,
-        #[clap(long)]
-        name: String,
-    },
-    Get {
-        #[clap(long)]
-        name: String,
+        order_details: String,
     },
 }
