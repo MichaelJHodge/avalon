@@ -246,7 +246,8 @@ impl EventLoop {
         }
     }
 
-    //Handling various swarm events.
+    //Handling various swarm events - THIS IS WHERE
+    //MUCH OF THE LOGIC WILL GO
     async fn handle_event(&mut self, event: SwarmEvent<BehaviourEvent>) {
         match event {
             //Handling Kademlia events related to outbound queries.
@@ -476,7 +477,7 @@ impl EventLoop {
 //Defining the network behavior combining multiple libp2p protocols.
 #[derive(NetworkBehaviour)]
 struct Behaviour {
-    request_response: request_response::cbor::Behaviour<FileRequest, FileResponse>,
+    request_response: request_response::cbor::Behaviour<LimitOrderRequest, LimitOrderResponse>,
     kademlia: kad::Behaviour<kad::store::MemoryStore>,
 }
 
@@ -495,6 +496,10 @@ enum Command {
     },
     StartProviding {
         file_name: String,
+        sender: oneshot::Sender<()>,
+    },
+    ProvideOrder {
+        order_details: String,
         sender: oneshot::Sender<()>,
     },
     GetProviders {
@@ -520,6 +525,18 @@ pub(crate) enum Event {
         request: String,
         channel: ResponseChannel<FileResponse>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LimitOrderRequest {
+    // Define the fields for a limit order request
+    // e.g., order type, amount, price, asset, etc.
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LimitOrderResponse {
+    // Define the fields for a limit order response
+    // e.g., confirmation of order received, order status, etc.
 }
 
 // Simple file exchange protocol

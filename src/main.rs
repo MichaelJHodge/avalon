@@ -66,53 +66,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     //responds with the content of the file on incoming requests.
 
     match opt.argument {
-        // Providing a file.
-        CliArgument::Provide { path, name } => {
-            // Advertise oneself as a provider of the file on the DHT.
-            network_client.start_providing(name.clone()).await;
-
-            loop {
-                match network_events.next().await {
-                    // Reply with the content of the file on incoming requests.
-                    Some(network::Event::InboundRequest { request, channel }) => {
-                        if request == name {
-                            network_client
-                                .respond_file(std::fs::read(&path)?, channel)
-                                .await;
-                        }
-                    }
-                    e => todo!("{:?}", e),
-                }
-            }
-        }
-
-        //If the Get variant is provided, the program first locates all nodes that provide
-        //the file. It then requests the content of the file from each node and ignores
-        //the remaining requests once a single one succeeds. The content of the file is
-        //then written to the standard output (stdout).
-
-        // Locating and getting a file.
-        CliArgument::Get { name } => {
-            // Locate all nodes providing the file.
-            let providers = network_client.get_providers(name.clone()).await;
-            if providers.is_empty() {
-                return Err(format!("Could not find provider for file {name}.").into());
-            }
-
-            // Request the content of the file from each node.
-            let requests = providers.into_iter().map(|p| {
-                let mut network_client = network_client.clone();
-                let name = name.clone();
-                async move { network_client.request_file(p, name).await }.boxed()
-            });
-
-            // Await the requests, ignore the remaining once a single one succeeds.
-            let file_content = futures::future::select_ok(requests)
-                .await
-                .map_err(|_| "None of the providers returned file.")?
-                .0;
-
-            std::io::stdout().write_all(&file_content)?;
+        //Provide an order and propogate it to other peers
+        CliArgument::ProvideOrder { order_details } => {
+            // Process order details and add to local order book
+            // Send order to other peers or respond to incoming order requests
         }
     }
 
@@ -144,6 +101,10 @@ struct Opt {
 
 /// Represents the subcommands of the program.
 enum CliArgument {
+    ProvideOrder {
+        #[clap(long)]
+        order_details: String,
+    },
     Provide {
         #[clap(long)]
         path: PathBuf,
