@@ -3,13 +3,48 @@ mod network;
 use async_std::task::spawn;
 use clap::Parser;
 
-use futures::prelude::*;
 use futures::StreamExt;
-use libp2p::{core::Multiaddr, multiaddr::Protocol};
+use serde_json::json;
+use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
+use std::fs::{self, File};
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::PathBuf;
+
 use tracing_subscriber::EnvFilter;
+// The network module - responsible for setting up and managing the P2P network.
+use futures::channel::{mpsc, oneshot}; // Asynchronous channels for communication.
+use futures::prelude::*; // Importing futures utilities for async operations.
+
+// Importing necessary components from libp2p.
+use libp2p::StreamProtocol; // Protocol for streaming data.
+use libp2p::{
+    core::Multiaddr, // Multiaddress for network addresses.
+    gossipsub,       // Gossipsub for pub-sub messaging. Used for gossiping order details.
+    identify,        // For generating identity keys.
+    identity,
+    kad,                 // Kademlia DHT for peer discovery and content distribution.
+    multiaddr::Protocol, // Networking protocols.
+    noise,               // Noise protocol for encryption.
+    request_response::{self, OutboundRequestId, ProtocolSupport, ResponseChannel}, // For request-response communication pattern.
+    swarm::{NetworkBehaviour, Swarm, SwarmEvent}, // Core libp2p components for networking.
+    tcp,
+    yamux,
+    PeerId, // TCP protocol, yamux for multiplexing, and PeerId type.
+};
+use serde::{Deserialize, Serialize}; // For serializing and deserializing data.
+use std::collections::{hash_map, HashMap, HashSet}; // Standard collections.
+use std::time::Duration;
+use tokio::{io, select, time};
+
+//Defining the network behavior combining multiple libp2p protocols.
+#[derive(NetworkBehaviour)]
+struct AvalonBehaviour {
+    gossipsub: gossipsub::Behaviour,
+    kademlia: kad::Behaviour<kad::store::MemoryStore>,
+    identify: identify::Behaviour,
+}
 
 //The main function is the entry point of the program. It is asynchronous,
 //which means it can perform non-blocking operations. It returns a Result type,
@@ -17,13 +52,112 @@ use tracing_subscriber::EnvFilter;
 //Box<dyn Error> if something goes wrong.
 #[async_std::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    //Parse the command line arguments.
+    let opt = Opt::parse();
+
+    //Create a channel for sending offers to the network.
+    //The channel has a buffer size of 100, which means it can hold up to 100 offers
+    //before it starts blocking. The order_tx variable is used to send offers to the
+    //channel, and the order_rx variable is used to receive offers from the channel.
+    let (order_tx, mut order_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
+
+    // Create a public/private key pair, either random or based on a seed, for node identity.
+    let id_keys = match opt.peer_id_file {
+        Some(ref file_path) if fs::metadata(file_path).is_ok() => get_keypair_from_file(file_path)?,
+        _ => {
+            let keypair = identity::Keypair::generate_ed25519();
+            if let Some(ref file_path) = opt.peer_id_file {
+                save_keypair_file(&keypair, file_path)?;
+            }
+            keypair
+        }
+    };
+    //Convert public key to peer ID.
+    let peer_id = id_keys.public().to_peer_id();
+
     //Used for initializing a global tracing subscriber, which is used for application-level logging.
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .try_init();
 
-    //Parse the command line arguments.
-    let opt = Opt::parse();
+    //Building the libp2p swarm.
+    let mut swarm = libp2p::SwarmBuilder::with_existing_identity(id_keys)
+        // .with_tokio()
+        .with_async_std()
+        .with_tcp(
+            tcp::Config::default(),
+            noise::Config::new,
+            yamux::Config::default,
+        )?
+        .with_behaviour(|key| {
+            //Set up a custom gossipsub message id function
+            //This is used to identify/prevent duplicate messages
+            let offer_id = |message: &gossipsub::Message| {
+                let mut s = DefaultHasher::new();
+                message.data.hash(&mut s);
+                gossipsub::MessageId::from(s.finish().to_string())
+            };
+            //Set up a custom gossipsub config
+            let gossipsub_config = gossipsub::ConfigBuilder::default()
+                .heartbeat_interval(Duration::from_secs(10))
+                //No dupllicate offers will be sent
+                .message_id_fn(offer_id)
+                .build()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+            let gossipsub_privacy = gossipsub::MessageAuthenticity::Signed(key.clone());
+
+            // build a gossipsub network behaviour
+            let gossipsub = gossipsub::Behaviour::new(gossipsub_privacy, gossipsub_config)?;
+
+            //Setting up the Kademlia behaviour for peer dsicovery and content distribution.
+
+            let mut kademlia_config = kad::Config::default();
+
+            // Set the protocol name for Kademlia protocol.
+            kademlia_config.set_protocol_names(vec![StreamProtocol::try_from_owned(
+                "/avalon/kad/1".to_string(),
+            )?]);
+
+            // Set the query timeout to 60 seconds.
+            kademlia_config.set_query_timeout(Duration::from_secs(60));
+
+            let store = kad::store::MemoryStore::new(key.public().to_peer_id());
+
+            // Build the Kademlia behaviour.
+            let mut kademlia =
+                kad::Behaviour::with_config(key.public().to_peer_id(), store, kademlia_config);
+
+            // Bootstrap the Kademlia DHT.
+            kademlia.bootstrap().unwrap();
+
+            // Setting up the Identify behaviour for peer identification.
+            let identify = identify::Behaviour::new(identify::Config::new(
+                "/avalon/id/1".into(),
+                key.public().clone(),
+            ));
+
+            // Return the behaviour.
+            Ok(AvalonBehaviour {
+                gossipsub,
+                kademlia,
+                identify,
+            })
+        })?
+        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+        .build();
+
+    // Create a Gossipsub topic
+    let topic = gossipsub::IdentTopic::new("/avalon/orders/1");
+
+    // Subscribes to our topic
+    swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
+
+    //Set the Kademlia DHT to server mode.
+    swarm
+        .behaviour_mut()
+        .kademlia
+        .set_mode(Some(kad::Mode::Server)); // Setting the Kademlia DHT to server mode.
 
     //Create a new network client, network events stream, and network event loop.
     //The network event loop is then spawnwed as a task to run in the background.
@@ -60,63 +194,44 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .expect("Dial to succeed");
     }
 
+    //TODO: Implement swarm event handling
+    //THIS IS WHERE MUCH OF THE LOGIC WILL GO
+
+    //Question: Do I still need these arguments?
     //Then check the argument field of opt to see what the user wants to do.
     //If the Provide variant is provided, the program advertises itself as a provider
     //of the file on the DHT. It then waits for incoming requests for the file and
     //responds with the content of the file on incoming requests.
 
     match opt.argument {
-        // Providing a file.
-        CliArgument::Provide { path, name } => {
-            // Advertise oneself as a provider of the file on the DHT.
-            network_client.start_providing(name.clone()).await;
-
-            loop {
-                match network_events.next().await {
-                    // Reply with the content of the file on incoming requests.
-                    Some(network::Event::InboundRequest { request, channel }) => {
-                        if request == name {
-                            network_client
-                                .respond_file(std::fs::read(&path)?, channel)
-                                .await;
-                        }
-                    }
-                    e => todo!("{:?}", e),
-                }
-            }
-        }
-
-        //If the Get variant is provided, the program first locates all nodes that provide
-        //the file. It then requests the content of the file from each node and ignores
-        //the remaining requests once a single one succeeds. The content of the file is
-        //then written to the standard output (stdout).
-
-        // Locating and getting a file.
-        CliArgument::Get { name } => {
-            // Locate all nodes providing the file.
-            let providers = network_client.get_providers(name.clone()).await;
-            if providers.is_empty() {
-                return Err(format!("Could not find provider for file {name}.").into());
-            }
-
-            // Request the content of the file from each node.
-            let requests = providers.into_iter().map(|p| {
-                let mut network_client = network_client.clone();
-                let name = name.clone();
-                async move { network_client.request_file(p, name).await }.boxed()
-            });
-
-            // Await the requests, ignore the remaining once a single one succeeds.
-            let file_content = futures::future::select_ok(requests)
-                .await
-                .map_err(|_| "None of the providers returned file.")?
-                .0;
-
-            std::io::stdout().write_all(&file_content)?;
-        }
+        //Provide an order and propogate it to other peers
+        CliArgument::ProvideOrder { order_details } => {}
+        //Rceive an order
+        CliArgument::ReceiveOrder { order_details } => {}
     }
 
     Ok(())
+}
+
+fn save_keypair_file(keypair: &identity::Keypair, file_path: &str) -> io::Result<()> {
+    let encoded = keypair.to_protobuf_encoding().unwrap();
+    let keypair_json: IdentityJson = IdentityJson { identity: encoded };
+    let json = serde_json::to_string(&keypair_json)?;
+    let mut file = File::create(file_path)?;
+    file.write_all(json.as_bytes())?;
+    Ok(())
+}
+
+fn get_keypair_from_file(file_path: &str) -> io::Result<identity::Keypair> {
+    let contents = fs::read_to_string(file_path)?;
+    let keypair_json: IdentityJson = serde_json::from_str(&contents)?;
+    identity::Keypair::from_protobuf_encoding(&keypair_json.identity)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid keypair data"))
+}
+
+#[derive(Serialize, Deserialize)]
+struct IdentityJson {
+    identity: Vec<u8>,
 }
 
 #[derive(Parser, Debug)]
@@ -131,6 +246,14 @@ struct Opt {
     #[clap(long)]
     peer: Option<Multiaddr>,
 
+    //Store peer id in a file for resuse if necessary
+    #[clap(
+        long,
+        short,
+        help = "Store peer id in a file for resuse if necessary (only useful for known peers)"
+    )]
+    peer_id_file: Option<String>,
+
     /// The address to listen on for incoming connections.
     #[clap(long)]
     listen_address: Option<Multiaddr>,
@@ -144,14 +267,12 @@ struct Opt {
 
 /// Represents the subcommands of the program.
 enum CliArgument {
-    Provide {
+    ProvideOrder {
         #[clap(long)]
-        path: PathBuf,
-        #[clap(long)]
-        name: String,
+        order_details: String,
     },
-    Get {
+    ReceiveOrder {
         #[clap(long)]
-        name: String,
+        order_details: String,
     },
 }

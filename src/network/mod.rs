@@ -52,6 +52,7 @@ pub(crate) async fn new(
 
     //Building the libp2p swarm.
     let mut swarm = libp2p::SwarmBuilder::with_existing_identity(id_keys)
+        // .with_tokio()
         .with_async_std()
         .with_tcp(
             tcp::Config::default(),
@@ -66,10 +67,7 @@ pub(crate) async fn new(
             ),
             //Setting up the request-response protocol for file exchange.
             request_response: request_response::cbor::Behaviour::new(
-                [(
-                    StreamProtocol::new("/file-exchange/1"),
-                    ProtocolSupport::Full,
-                )],
+                [(StreamProtocol::new("/avalon/kad/1"), ProtocolSupport::Full)],
                 request_response::Config::default(),
             ),
         })?
@@ -134,62 +132,34 @@ impl Client {
         receiver.await.expect("Sender not to be dropped.")
     }
 
-    /// Advertise the local node as the provider of the given file on the DHT.
-    pub(crate) async fn start_providing(&mut self, file_name: String) {
+    /// Advertise the local node as the provider of the given order on the DHT.
+    pub(crate) async fn start_providing(&mut self, order_details: String) {
         //Similar pattern as start_listening in that we send a command to the network and wait for the response.
 
         let (sender, receiver) = oneshot::channel();
         self.sender
-            .send(Command::StartProviding { file_name, sender })
+            .send(Command::StartProviding {
+                order_details,
+                sender,
+            })
             .await
             .expect("Command receiver not to be dropped.");
         receiver.await.expect("Sender not to be dropped.");
     }
 
-    /// Find the providers for the given file on the DHT.
-    pub(crate) async fn get_providers(&mut self, file_name: String) -> HashSet<PeerId> {
+    /// Find the providers for the given order on the DHT.
+    pub(crate) async fn get_providers(&mut self, order_details: String) -> HashSet<PeerId> {
         //Similar pattern as start_listening in that we send a command to the network and wait for the response.
 
         let (sender, receiver) = oneshot::channel();
         self.sender
-            .send(Command::GetProviders { file_name, sender })
-            .await
-            .expect("Command receiver not to be dropped.");
-        receiver.await.expect("Sender not to be dropped.")
-    }
-
-    /// Request the content of the given file from the given peer.
-    pub(crate) async fn request_file(
-        &mut self,
-        peer: PeerId,      //The peer to request the file from.
-        file_name: String, //The name of the file to request.
-    ) -> Result<Vec<u8>, Box<dyn Error + Send>> {
-        //Similar pattern as start_listening in that we send a command to the network and wait for the response.
-
-        let (sender, receiver) = oneshot::channel();
-        self.sender
-            .send(Command::RequestFile {
-                file_name,
-                peer,
+            .send(Command::GetProviders {
+                order_details,
                 sender,
             })
             .await
             .expect("Command receiver not to be dropped.");
-        receiver.await.expect("Sender not be dropped.")
-    }
-
-    /// Respond with the provided file content to the given request.
-    pub(crate) async fn respond_file(
-        &mut self,
-        file: Vec<u8>, //The file content to send. This is a vector of bytes.
-        channel: ResponseChannel<FileResponse>, //The channel to send the response on.
-    ) {
-        //Similar pattern as start_listening in that we send a command to the network and wait for the response.
-
-        self.sender
-            .send(Command::RespondFile { file, channel })
-            .await
-            .expect("Command receiver not to be dropped.");
+        receiver.await.expect("Sender not to be dropped.")
     }
 }
 
@@ -248,7 +218,8 @@ impl EventLoop {
         }
     }
 
-    //Handling various swarm events.
+    //Handling various swarm events - THIS IS WHERE
+    //MUCH OF THE LOGIC WILL GO
     async fn handle_event(&mut self, event: SwarmEvent<BehaviourEvent>) {
         match event {
             //Handling Kademlia events related to outbound queries.
@@ -312,7 +283,7 @@ impl EventLoop {
                 } => {
                     self.event_sender
                         .send(Event::InboundRequest {
-                            request: request.0,
+                            request: request,
                             channel,
                         })
                         .await
@@ -326,7 +297,7 @@ impl EventLoop {
                         .pending_request_file
                         .remove(&request_id)
                         .expect("Request to still be pending.")
-                        .send(Ok(response.0));
+                        .send(Ok(response));
                 }
             },
             SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
@@ -419,14 +390,44 @@ impl EventLoop {
                     todo!("Already dialing peer."); //Placeholder: Handle already dialing peer.
                 }
             }
+
+            Command::ProvideOrder {
+                order_details,
+                sender,
+            } => {
+                //Initiate providing the order through Kademlia DHT.
+                let query_id = self
+                    .swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .start_providing(order_details.into_bytes().into())
+                    .expect("No store error.");
+                self.pending_start_providing.insert(query_id, sender);
+            }
+            Command::ReceiveOrder {
+                order_details,
+                sender,
+            } => {
+                //Initiate receiving the order through Kademlia DHT.
+                let query_id = self
+                    .swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .start_providing(order_details.into_bytes().into())
+                    .expect("No store error.");
+                self.pending_start_providing.insert(query_id, sender);
+            }
             //Handling command to start providing a file.
-            Command::StartProviding { file_name, sender } => {
+            Command::StartProviding {
+                order_details,
+                sender,
+            } => {
                 //Initiate providing the file through Kademlia DHT.
                 let query_id = self
                     .swarm
                     .behaviour_mut()
                     .kademlia
-                    .start_providing(file_name.into_bytes().into())
+                    .start_providing(order_details.into_bytes().into())
                     .expect("No store error.");
                 self.pending_start_providing.insert(query_id, sender);
             }
@@ -434,42 +435,16 @@ impl EventLoop {
             //This is a query to the Kademlia DHT.
             //The result is returned through the sender.
             //The sender is stored in a map for later retrieval.
-            Command::GetProviders { file_name, sender } => {
+            Command::GetProviders {
+                order_details,
+                sender,
+            } => {
                 let query_id = self
                     .swarm
                     .behaviour_mut()
                     .kademlia
-                    .get_providers(file_name.into_bytes().into());
+                    .get_providers(order_details.into_bytes().into());
                 self.pending_get_providers.insert(query_id, sender);
-            }
-            //Handling command to request a file from a peer.
-            //This is a request-response operation.
-            //The result is returned through the sender.
-            //The sender is stored in a map for later retrieval.
-            Command::RequestFile {
-                file_name,
-                peer,
-                sender,
-            } => {
-                let request_id = self
-                    .swarm
-                    .behaviour_mut()
-                    .request_response
-                    .send_request(&peer, FileRequest(file_name));
-                self.pending_request_file.insert(request_id, sender);
-            }
-            //Handling command to respond to a file request.
-            //This is a request-response operation.
-            //The response is sent through the channel.
-            //The channel is provided by the request-response protocol.
-            //The channel is stored in a map for later retrieval.
-            //The request-response protocol handles the rest of the operation.
-            Command::RespondFile { file, channel } => {
-                self.swarm
-                    .behaviour_mut()
-                    .request_response
-                    .send_response(channel, FileResponse(file))
-                    .expect("Connection to peer to be still open.");
             }
         }
     }
@@ -478,7 +453,7 @@ impl EventLoop {
 //Defining the network behavior combining multiple libp2p protocols.
 #[derive(NetworkBehaviour)]
 struct Behaviour {
-    request_response: request_response::cbor::Behaviour<FileRequest, FileResponse>,
+    request_response: request_response::cbor::Behaviour<LimitOrderRequest, LimitOrderResponse>,
     kademlia: kad::Behaviour<kad::store::MemoryStore>,
 }
 
@@ -496,21 +471,20 @@ enum Command {
         sender: oneshot::Sender<Result<(), Box<dyn Error + Send>>>,
     },
     StartProviding {
-        file_name: String,
+        order_details: String,
+        sender: oneshot::Sender<()>,
+    },
+    ProvideOrder {
+        order_details: String,
+        sender: oneshot::Sender<()>,
+    },
+    ReceiveOrder {
+        order_details: String,
         sender: oneshot::Sender<()>,
     },
     GetProviders {
-        file_name: String,
+        order_details: String,
         sender: oneshot::Sender<HashSet<PeerId>>,
-    },
-    RequestFile {
-        file_name: String,
-        peer: PeerId,
-        sender: oneshot::Sender<Result<Vec<u8>, Box<dyn Error + Send>>>,
-    },
-    RespondFile {
-        file: Vec<u8>,
-        channel: ResponseChannel<FileResponse>,
     },
 }
 
@@ -522,6 +496,18 @@ pub(crate) enum Event {
         request: String,
         channel: ResponseChannel<FileResponse>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LimitOrderRequest {
+    // Define the fields for a limit order request
+    // e.g., order type, amount, price, asset, etc.
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LimitOrderResponse {
+    // Define the fields for a limit order response
+    // e.g., confirmation of order received, order status, etc.
 }
 
 // Simple file exchange protocol
