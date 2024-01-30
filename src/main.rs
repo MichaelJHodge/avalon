@@ -106,24 +106,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             //Setting up the Kademlia behaviour for peer dsicovery and content distribution.
 
-            let mut cfg = kad::Config::default();
+            let mut kademlia_config = kad::Config::default();
 
-            cfg.set_protocol_names(vec![StreamProtocol::try_from_owned(
+            // Set the protocol name for Kademlia protocol.
+            kademlia_config.set_protocol_names(vec![StreamProtocol::try_from_owned(
                 "/avalon/kad/1".to_string(),
             )?]);
 
-            cfg.set_query_timeout(Duration::from_secs(60));
+            // Set the query timeout to 60 seconds.
+            kademlia_config.set_query_timeout(Duration::from_secs(60));
+
             let store = kad::store::MemoryStore::new(key.public().to_peer_id());
 
-            let mut kademlia = kad::Behaviour::with_config(key.public().to_peer_id(), store, cfg);
+            // Build the Kademlia behaviour.
+            let mut kademlia =
+                kad::Behaviour::with_config(key.public().to_peer_id(), store, kademlia_config);
 
+            // Bootstrap the Kademlia DHT.
             kademlia.bootstrap().unwrap();
 
+            // Setting up the Identify behaviour for peer identification.
             let identify = identify::Behaviour::new(identify::Config::new(
                 "/avalon/id/1".into(),
                 key.public().clone(),
             ));
 
+            // Return the behaviour.
             Ok(AvalonBehaviour {
                 gossipsub,
                 kademlia,
@@ -133,6 +141,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
 
+    // Create a Gossipsub topic
+    let topic = gossipsub::IdentTopic::new("/avalon/orders/1");
+
+    // Subscribes to our topic
+    swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
+
+    //Set the Kademlia DHT to server mode.
     swarm
         .behaviour_mut()
         .kademlia
