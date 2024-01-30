@@ -55,6 +55,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     //Parse the command line arguments.
     let opt = Opt::parse();
 
+    //Create a channel for sending offers to the network.
+    //The channel has a buffer size of 100, which means it can hold up to 100 offers
+    //before it starts blocking. The order_tx variable is used to send offers to the
+    //channel, and the order_rx variable is used to receive offers from the channel.
+    let (order_tx, mut order_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
+
     // Create a public/private key pair, either random or based on a seed, for node identity.
     let id_keys = match opt.peer_id_file {
         Some(ref file_path) if fs::metadata(file_path).is_ok() => get_keypair_from_file(file_path)?,
@@ -188,6 +194,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .expect("Dial to succeed");
     }
 
+    //TODO: Implement swarm event handling
+    //THIS IS WHERE MUCH OF THE LOGIC WILL GO
+
+    //Question: Do I still need these arguments?
     //Then check the argument field of opt to see what the user wants to do.
     //If the Provide variant is provided, the program advertises itself as a provider
     //of the file on the DHT. It then waits for incoming requests for the file and
