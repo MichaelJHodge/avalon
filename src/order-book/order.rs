@@ -52,10 +52,10 @@ impl LimitOrder {
         }
     }
 
-    pub fn side(&self) -> OrderSide {
+    pub fn side(&self) -> Option<OrderSide> {
         match self.side {
-            0 => OrderSide::Buy,
-            1 => OrderSide::Sell,
+            0 => Some(OrderSide::Buy),
+            1 => Some(OrderSide::Sell),
             _ => None,
         }
     }
