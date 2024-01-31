@@ -4,12 +4,14 @@ use futures::prelude::*; // Importing futures utilities for async operations.
 
 // Importing necessary components from libp2p.
 use libp2p::{
-    core::Multiaddr,     // Multiaddress for network addresses.
-    identity,            // For generating identity keys.
-    kad,                 // Kademlia DHT for peer discovery and content distribution.
+    core::Multiaddr,                              // Multiaddress for network addresses.
+    gossipsub, // Gossipsub for pub-sub messaging. Used for gossiping order details.
+    identify,  // Identify protocol for peer identification.
+    identity,  // For generating identity keys.
+    kad,       // Kademlia DHT for peer discovery and content distribution.
     multiaddr::Protocol, // Networking protocols.
-    noise,               // Noise protocol for encryption.
-    request_response::{self, OutboundRequestId, ProtocolSupport, ResponseChannel}, // For request-response communication pattern.
+    noise,     // Noise protocol for encryption.
+    request_response::OutboundRequestId, // For request-response communication pattern.
     swarm::{NetworkBehaviour, Swarm, SwarmEvent}, // Core libp2p components for networking.
     tcp,
     yamux,
@@ -18,9 +20,13 @@ use libp2p::{
 
 use libp2p::StreamProtocol; // Protocol for streaming data.
 use serde::{Deserialize, Serialize}; // For serializing and deserializing data.
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{hash_map, HashMap, HashSet}; // Standard collections.
+
 use std::error::Error; // Error handling.
+use std::hash::{Hash, Hasher};
 use std::time::Duration; // For specifying durations.
+use tokio::io; // Used for I/O operations, meaning input/output operations.
 
 //Defines the network architecture, behaviors, and client interface for managing peer-to-peer interactions.
 
@@ -33,6 +39,14 @@ use std::time::Duration; // For specifying durations.
 ///
 /// - The network task driving the network itself.
 ///
+
+//Defining the network behavior combining multiple libp2p protocols.
+#[derive(NetworkBehaviour)]
+pub struct AvalonBehaviour {
+    pub gossipsub: gossipsub::Behaviour,
+    pub kademlia: kad::Behaviour<kad::store::MemoryStore>,
+    pub identify: identify::Behaviour,
+}
 
 //function to create and initialize the network components.
 pub(crate) async fn new(
@@ -47,8 +61,12 @@ pub(crate) async fn new(
         }
         None => identity::Keypair::generate_ed25519(),
     };
-    //Convert public key to peer ID.
-    let peer_id = id_keys.public().to_peer_id();
+
+    //Create a channel for sending offers to the network.
+    //The channel has a buffer size of 100, which means it can hold up to 100 offers
+    //before it starts blocking. The order_tx variable is used to send offers to the
+    //channel, and the order_rx variable is used to receive offers from the channel.
+    let (order_tx, mut order_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
 
     //Building the libp2p swarm.
     let mut swarm = libp2p::SwarmBuilder::with_existing_identity(id_keys)
@@ -59,25 +77,76 @@ pub(crate) async fn new(
             noise::Config::new,
             yamux::Config::default,
         )?
-        .with_behaviour(|key| Behaviour {
-            //Setting up the Kademlia DHT for peer dsicovery and content distribution.
-            kademlia: kad::Behaviour::new(
-                peer_id,
-                kad::store::MemoryStore::new(key.public().to_peer_id()),
-            ),
-            //Setting up the request-response protocol for file exchange.
-            request_response: request_response::cbor::Behaviour::new(
-                [(StreamProtocol::new("/avalon/kad/1"), ProtocolSupport::Full)],
-                request_response::Config::default(),
-            ),
+        .with_behaviour(|key| {
+            //Set up a custom gossipsub message id function
+            //This is used to identify/prevent duplicate messages
+            let offer_id = |message: &gossipsub::Message| {
+                let mut s = DefaultHasher::new();
+                message.data.hash(&mut s);
+                gossipsub::MessageId::from(s.finish().to_string())
+            };
+            //Set up a custom gossipsub config
+            let gossipsub_config = gossipsub::ConfigBuilder::default()
+                .heartbeat_interval(Duration::from_secs(10))
+                //No dupllicate offers will be sent
+                .message_id_fn(offer_id)
+                .build()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+            let gossipsub_privacy = gossipsub::MessageAuthenticity::Signed(key.clone());
+
+            // build a gossipsub network behaviour
+            let gossipsub = gossipsub::Behaviour::new(gossipsub_privacy, gossipsub_config)?;
+
+            //Setting up the Kademlia behaviour for peer dsicovery and content distribution.
+
+            let mut kademlia_config = kad::Config::default();
+
+            // Set the protocol name for Kademlia protocol.
+            kademlia_config.set_protocol_names(vec![StreamProtocol::try_from_owned(
+                "/avalon/kad/1".to_string(),
+            )?]);
+
+            // Set the query timeout to 60 seconds.
+            kademlia_config.set_query_timeout(Duration::from_secs(60));
+
+            let store = kad::store::MemoryStore::new(key.public().to_peer_id());
+
+            // Build the Kademlia behaviour.
+            let mut kademlia =
+                kad::Behaviour::with_config(key.public().to_peer_id(), store, kademlia_config);
+
+            // Bootstrap the Kademlia DHT.
+            kademlia.bootstrap().unwrap();
+
+            // Setting up the Identify behaviour for peer identification.
+            let identify = identify::Behaviour::new(identify::Config::new(
+                "/avalon/id/1".into(),
+                key.public().clone(),
+            ));
+
+            // Return the behaviour.
+            Ok(AvalonBehaviour {
+                gossipsub,
+                kademlia,
+                identify,
+            })
         })?
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
+
+    //Set the Kademlia DHT to server mode.
 
     swarm
         .behaviour_mut()
         .kademlia
         .set_mode(Some(kad::Mode::Server)); // Setting the Kademlia DHT to server mode.
+
+    // Create a Gossipsub topic
+    let topic = gossipsub::IdentTopic::new("/avalon/orders/1");
+
+    // Subscribes to our topic
+    swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
 
     //Channels for command and event communication.
     let (command_sender, command_receiver) = mpsc::channel(0);
@@ -92,6 +161,9 @@ pub(crate) async fn new(
         EventLoop::new(swarm, command_receiver, event_sender),
     ))
 }
+
+//TODO: EDIT THE BELOW CODE TO FIT THE NETWORK MODULE AND ADD EVENT HANDLERS:
+//THIS WILL BE THE BUSINESS LOGIC OF THE NETWORK
 
 //The Client struct provides a simple interface for interacting with the network layer.
 #[derive(Clone)]
@@ -133,12 +205,13 @@ impl Client {
     }
 
     /// Advertise the local node as the provider of the given order on the DHT.
-    pub(crate) async fn start_providing(&mut self, order_details: String) {
+
+    pub(crate) async fn provide_order(&mut self, order_details: String) {
         //Similar pattern as start_listening in that we send a command to the network and wait for the response.
 
         let (sender, receiver) = oneshot::channel();
         self.sender
-            .send(Command::StartProviding {
+            .send(Command::ProvideOrder {
                 order_details,
                 sender,
             })
@@ -146,7 +219,6 @@ impl Client {
             .expect("Command receiver not to be dropped.");
         receiver.await.expect("Sender not to be dropped.");
     }
-
     /// Find the providers for the given order on the DHT.
     pub(crate) async fn get_providers(&mut self, order_details: String) -> HashSet<PeerId> {
         //Similar pattern as start_listening in that we send a command to the network and wait for the response.
@@ -165,7 +237,7 @@ impl Client {
 
 //Event loop struct manages the network's event loop.
 pub(crate) struct EventLoop {
-    swarm: Swarm<Behaviour>, // The libp2p Swarm managing network behaviors.
+    swarm: Swarm<AvalonBehaviour>, // The libp2p Swarm managing network behaviors.
     command_receiver: mpsc::Receiver<Command>, // Receiver for network commands.
     event_sender: mpsc::Sender<Event>, // Sender for network events.
     // Maps and hashes for tracking various network operations.
@@ -183,7 +255,7 @@ impl EventLoop {
     // It returns the event loop.
 
     fn new(
-        swarm: Swarm<Behaviour>,                   // The libp2p Swarm.
+        swarm: Swarm<AvalonBehaviour>,             // The libp2p Swarm.
         command_receiver: mpsc::Receiver<Command>, // Command receiver.
         event_sender: mpsc::Sender<Event>,         // Event sender.
     ) -> Self {
@@ -220,10 +292,10 @@ impl EventLoop {
 
     //Handling various swarm events - THIS IS WHERE
     //MUCH OF THE LOGIC WILL GO
-    async fn handle_event(&mut self, event: SwarmEvent<BehaviourEvent>) {
+    async fn handle_event(&mut self, event: SwarmEvent<AvalonBehaviourEvent>) {
         match event {
             //Handling Kademlia events related to outbound queries.
-            SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
+            SwarmEvent::Behaviour(AvalonBehaviourEvent::Kademlia(
                 kad::Event::OutboundQueryProgressed {
                     id,
                     result: kad::QueryResult::StartProviding(_),
@@ -239,7 +311,7 @@ impl EventLoop {
                 let _ = sender.send(()); //Sending cempletion notification.
             }
             //More Kademlia events for finding providers of a file.
-            SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
+            SwarmEvent::Behaviour(AvalonBehaviourEvent::Kademlia(
                 kad::Event::OutboundQueryProgressed {
                     id,
                     result:
@@ -264,7 +336,7 @@ impl EventLoop {
                 }
             }
             //Handling other Kademlia events and request-response protocol events.
-            SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
+            SwarmEvent::Behaviour(AvalonBehaviourEvent::Kademlia(
                 kad::Event::OutboundQueryProgressed {
                     result:
                         kad::QueryResult::GetProviders(Ok(
@@ -273,47 +345,7 @@ impl EventLoop {
                     ..
                 },
             )) => {}
-            SwarmEvent::Behaviour(BehaviourEvent::Kademlia(_)) => {}
-
-            SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
-                request_response::Event::Message { message, .. },
-            )) => match message {
-                request_response::Message::Request {
-                    request, channel, ..
-                } => {
-                    self.event_sender
-                        .send(Event::InboundRequest {
-                            request: request,
-                            channel,
-                        })
-                        .await
-                        .expect("Event receiver not to be dropped.");
-                }
-                request_response::Message::Response {
-                    request_id,
-                    response,
-                } => {
-                    let _ = self
-                        .pending_request_file
-                        .remove(&request_id)
-                        .expect("Request to still be pending.")
-                        .send(Ok(response));
-                }
-            },
-            SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
-                request_response::Event::OutboundFailure {
-                    request_id, error, ..
-                },
-            )) => {
-                let _ = self
-                    .pending_request_file
-                    .remove(&request_id)
-                    .expect("Request to still be pending.")
-                    .send(Err(Box::new(error)));
-            }
-            SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
-                request_response::Event::ResponseSent { .. },
-            )) => {}
+            SwarmEvent::Behaviour(AvalonBehaviourEvent::Kademlia(_)) => {}
 
             SwarmEvent::NewListenAddr { address, .. } => {
                 //Logging the new listen address of the local node.
@@ -450,13 +482,6 @@ impl EventLoop {
     }
 }
 
-//Defining the network behavior combining multiple libp2p protocols.
-#[derive(NetworkBehaviour)]
-struct Behaviour {
-    request_response: request_response::cbor::Behaviour<LimitOrderRequest, LimitOrderResponse>,
-    kademlia: kad::Behaviour<kad::store::MemoryStore>,
-}
-
 //Enum defining possible commands
 #[derive(Debug)]
 enum Command {
@@ -491,12 +516,7 @@ enum Command {
 //Enum for different types of events that can be emitted.
 
 #[derive(Debug)]
-pub(crate) enum Event {
-    InboundRequest {
-        request: String,
-        channel: ResponseChannel<FileResponse>,
-    },
-}
+pub(crate) enum Event {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct LimitOrderRequest {
@@ -509,11 +529,6 @@ pub(crate) struct LimitOrderResponse {
     // Define the fields for a limit order response
     // e.g., confirmation of order received, order status, etc.
 }
-
-// Simple file exchange protocol
-// The request-response protocol is used for file exchange.
-// The request is the file name, and the response is the file content.
-// The request-response protocol is a generic protocol that can be used for any type of request and response.
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct FileRequest(String);
