@@ -543,6 +543,7 @@ dependencies = [
  "ethers",
  "futures",
  "libp2p",
+ "libp2p-autonat",
  "serde",
  "serde_json",
  "tokio",
