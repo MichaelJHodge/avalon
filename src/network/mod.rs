@@ -3,15 +3,16 @@ use futures::channel::{mpsc, oneshot}; // Asynchronous channels for communicatio
 use futures::prelude::*; // Importing futures utilities for async operations.
 
 // Importing necessary components from libp2p.
+use crate::orderbook::LimitOrder;
 use libp2p::{
-    core::Multiaddr,                              // Multiaddress for network addresses.
-    gossipsub, // Gossipsub for pub-sub messaging. Used for gossiping order details.
-    identify,  // Identify protocol for peer identification.
-    identity,  // For generating identity keys.
-    kad,       // Kademlia DHT for peer discovery and content distribution.
+    autonat,
+    core::Multiaddr,     // Multiaddress for network addresses.
+    gossipsub,           // Gossipsub for pub-sub messaging. Used for gossiping order details.
+    identify,            // Identify protocol for peer identification.
+    identity,            // For generating identity keys.
+    kad,                 // Kademlia DHT for peer discovery and content distribution.
     multiaddr::Protocol, // Networking protocols.
-    noise,     // Noise protocol for encryption.
-    request_response::OutboundRequestId, // For request-response communication pattern.
+    noise,               // Noise protocol for encryption.
     swarm::{NetworkBehaviour, Swarm, SwarmEvent}, // Core libp2p components for networking.
     tcp,
     yamux,
@@ -46,6 +47,7 @@ pub struct AvalonBehaviour {
     pub gossipsub: gossipsub::Behaviour,
     pub kademlia: kad::Behaviour<kad::store::MemoryStore>,
     pub identify: identify::Behaviour,
+    pub autonat: autonat::Behaviour,
 }
 
 //function to create and initialize the network components.
@@ -67,6 +69,10 @@ pub(crate) async fn new(
     //before it starts blocking. The order_tx variable is used to send offers to the
     //channel, and the order_rx variable is used to receive offers from the channel.
     let (order_tx, mut order_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
+
+    //Configure autonat
+    let autonat_config = autonat::Config::default();
+    let autonat = autonat::Behaviour::new(id_keys.public().to_peer_id(), autonat_config);
 
     //Building the libp2p swarm.
     let mut swarm = libp2p::SwarmBuilder::with_existing_identity(id_keys)
@@ -130,6 +136,7 @@ pub(crate) async fn new(
                 gossipsub,
                 kademlia,
                 identify,
+                autonat,
             })
         })?
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
@@ -158,7 +165,7 @@ pub(crate) async fn new(
             sender: command_sender,
         },
         event_receiver,
-        EventLoop::new(swarm, command_receiver, event_sender),
+        EventLoop::new(swarm, command_receiver, event_sender, topic),
     ))
 }
 
@@ -206,7 +213,7 @@ impl Client {
 
     /// Advertise the local node as the provider of the given order on the DHT.
 
-    pub(crate) async fn provide_order(&mut self, order_details: String) {
+    pub(crate) async fn broadcast_order(&mut self, order_details: String) {
         //Similar pattern as start_listening in that we send a command to the network and wait for the response.
 
         let (sender, receiver) = oneshot::channel();
@@ -244,8 +251,7 @@ pub(crate) struct EventLoop {
     pending_dial: HashMap<PeerId, oneshot::Sender<Result<(), Box<dyn Error + Send>>>>, // Pending dial operations.
     pending_start_providing: HashMap<kad::QueryId, oneshot::Sender<()>>, // Pending start providing operations.
     pending_get_providers: HashMap<kad::QueryId, oneshot::Sender<HashSet<PeerId>>>, // Pending get providers operations.
-    pending_request_file:
-        HashMap<OutboundRequestId, oneshot::Sender<Result<Vec<u8>, Box<dyn Error + Send>>>>, // Pending request file operations.
+    topic: gossipsub::IdentTopic, // Gossipsub topic.
 }
 
 //Implementation of the event loop.
@@ -258,6 +264,7 @@ impl EventLoop {
         swarm: Swarm<AvalonBehaviour>,             // The libp2p Swarm.
         command_receiver: mpsc::Receiver<Command>, // Command receiver.
         event_sender: mpsc::Sender<Event>,         // Event sender.
+        topic: gossipsub::IdentTopic,              // Gossipsub topic.
     ) -> Self {
         Self {
             swarm,
@@ -267,7 +274,7 @@ impl EventLoop {
             pending_dial: Default::default(),
             pending_start_providing: Default::default(),
             pending_get_providers: Default::default(),
-            pending_request_file: Default::default(),
+            topic,
         }
     }
 
@@ -294,6 +301,21 @@ impl EventLoop {
     //MUCH OF THE LOGIC WILL GO
     async fn handle_event(&mut self, event: SwarmEvent<AvalonBehaviourEvent>) {
         match event {
+            //Handling  connection-related events
+            SwarmEvent::IncomingConnection { .. } => {}
+            SwarmEvent::ConnectionEstablished {
+                peer_id, endpoint, ..
+            } => {
+                //Handling a successfully established connection.
+                if endpoint.is_dialer() {
+                    //If the local node initiated the connection, notify the corresponding sender.
+                    if let Some(sender) = self.pending_dial.remove(&peer_id) {
+                        let _ = sender.send(Ok(()));
+                    }
+                }
+            }
+            SwarmEvent::ConnectionClosed { .. } => {}
+
             //Handling Kademlia events related to outbound queries.
             SwarmEvent::Behaviour(AvalonBehaviourEvent::Kademlia(
                 kad::Event::OutboundQueryProgressed {
@@ -310,7 +332,7 @@ impl EventLoop {
                     .expect("Completed query to be previously pending.");
                 let _ = sender.send(()); //Sending cempletion notification.
             }
-            //More Kademlia events for finding providers of a file.
+            //More Kademlia events for finding providers of an order?
             SwarmEvent::Behaviour(AvalonBehaviourEvent::Kademlia(
                 kad::Event::OutboundQueryProgressed {
                     id,
@@ -335,17 +357,55 @@ impl EventLoop {
                         .finish();
                 }
             }
-            //Handling other Kademlia events and request-response protocol events.
-            SwarmEvent::Behaviour(AvalonBehaviourEvent::Kademlia(
-                kad::Event::OutboundQueryProgressed {
-                    result:
-                        kad::QueryResult::GetProviders(Ok(
-                            kad::GetProvidersOk::FinishedWithNoAdditionalRecord { .. },
-                        )),
-                    ..
-                },
-            )) => {}
+
             SwarmEvent::Behaviour(AvalonBehaviourEvent::Kademlia(_)) => {}
+            //Handling gossipsub events.
+            //This is where I handle received limit orders.
+            //The received limit order is deserialized and handled as needed.
+            SwarmEvent::Behaviour(AvalonBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+                message,
+                ..
+            })) => {
+                if let Ok(limit_order) = serde_json::from_slice::<LimitOrder>(&message.data) {
+                    // Process the received limit order
+                    // e.g., add it to the order book?
+                    // Broadcast the order to the network
+                    println!(
+                        "Broadcasting Offer: {}",
+                        String::from_utf8_lossy(&limit_order)
+                    );
+
+                    if let Err(e) = self
+                        .swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .publish(self.topic.clone(), limit_order)
+                    {
+                        eprintln!("Error broadcasting order: {:?}", e);
+                    }
+                }
+            }
+
+            // Handling Identify events for dynamic network adjustments
+            SwarmEvent::Behaviour(AvalonBehaviourEvent::Identify(identify::Event::Received {
+                info,
+                peer_id,
+                ..
+            })) => {
+                // Mark the address observed for us by the external peer as confirmed.
+                for addr in info.listen_addrs {
+                    self.swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .add_address(&peer_id, addr);
+                }
+                // Optionally confirm your own address (consider libp2p-autonat)
+            }
+            // Add handling for autonat events
+            SwarmEvent::Behaviour(AvalonBehaviourEvent::Autonat(event)) => {
+                // Handle autonat events here
+                // e.g., log NAT status or public address
+            }
 
             SwarmEvent::NewListenAddr { address, .. } => {
                 //Logging the new listen address of the local node.
@@ -355,20 +415,6 @@ impl EventLoop {
                     address.with(Protocol::P2p(local_peer_id))
                 );
             }
-            //Handling more connection-related events
-            SwarmEvent::IncomingConnection { .. } => {}
-            SwarmEvent::ConnectionEstablished {
-                peer_id, endpoint, ..
-            } => {
-                //Handling a successfully established connection.
-                if endpoint.is_dialer() {
-                    //If the local node initiated the connection, notify the corresponding sender.
-                    if let Some(sender) = self.pending_dial.remove(&peer_id) {
-                        let _ = sender.send(Ok(()));
-                    }
-                }
-            }
-            SwarmEvent::ConnectionClosed { .. } => {}
 
             SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
                 if let Some(peer_id) = peer_id {
@@ -529,8 +575,3 @@ pub(crate) struct LimitOrderResponse {
     // Define the fields for a limit order response
     // e.g., confirmation of order received, order status, etc.
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct FileRequest(String);
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct FileResponse(Vec<u8>);
