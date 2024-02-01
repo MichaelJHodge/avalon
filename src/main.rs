@@ -1,4 +1,5 @@
 mod network;
+mod orderbook;
 
 use async_std::task::spawn;
 use clap::Parser;
@@ -64,10 +65,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     //Question: Do I still need these arguments?
-    //Then check the argument field of opt to see what the user wants to do.
-    //If the Provide variant is provided, the program advertises itself as a provider
-    //of the file on the DHT. It then waits for incoming requests for the file and
-    //responds with the content of the file on incoming requests.
 
     match opt.argument {
         //Provide an order and propogate it to other peers
