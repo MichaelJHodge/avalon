@@ -371,7 +371,7 @@ impl EventLoop {
                     // e.g., add it to the order book?
                     // Broadcast the order to the network
                     println!(
-                        "Broadcasting Offer: {}",
+                        "Broadcasting Limit Order: {}",
                         String::from_utf8_lossy(&limit_order)
                     );
 
