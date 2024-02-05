@@ -213,18 +213,26 @@ impl Client {
 
     /// Advertise the local node as the provider of the given order on the DHT.
 
-    pub(crate) async fn broadcast_order(&mut self, order_details: String) {
-        //Similar pattern as start_listening in that we send a command to the network and wait for the response.
-
-        let (sender, receiver) = oneshot::channel();
+    pub async fn provide_order(&mut self, order: LimitOrder) -> Result<(), Box<dyn Error + Send>> {
+        let serialized_order = serde_json::to_vec(&order).unwrap_or_default();
         self.sender
-            .send(Command::ProvideOrder {
-                order_details,
-                sender,
+            .send(Command::BroadcastOrder {
+                order_details: serialized_order,
             })
             .await
             .expect("Command receiver not to be dropped.");
-        receiver.await.expect("Sender not to be dropped.");
+        Ok(())
+    }
+    /// Receive an order from the network.
+    pub async fn receive_order(
+        &mut self,
+        order_details: Vec<u8>,
+    ) -> Result<(), Box<dyn Error + Send>> {
+        // Deserialize the order
+        let order = serde_json::from_slice::<LimitOrder>(&order_details);
+        // Here, add logic to process the order, e.g., adding to the order book
+
+        Ok(())
     }
     /// Find the providers for the given order on the DHT.
     pub(crate) async fn get_providers(&mut self, order_details: String) -> HashSet<PeerId> {
@@ -468,7 +476,16 @@ impl EventLoop {
                     todo!("Already dialing peer."); //Placeholder: Handle already dialing peer.
                 }
             }
-
+            Command::BroadcastOrder { order_details } => {
+                if let Err(e) = self
+                    .swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .publish(self.topic.clone(), order_details)
+                {
+                    eprintln!("Error broadcasting order: {:?}", e);
+                }
+            }
             Command::ProvideOrder {
                 order_details,
                 sender,
@@ -495,7 +512,7 @@ impl EventLoop {
                     .expect("No store error.");
                 self.pending_start_providing.insert(query_id, sender);
             }
-            //Handling command to start providing a file.
+            //Handling command to provide an order
             Command::StartProviding {
                 order_details,
                 sender,
@@ -509,7 +526,7 @@ impl EventLoop {
                     .expect("No store error.");
                 self.pending_start_providing.insert(query_id, sender);
             }
-            //Handling command to get providers of a file.
+            //Handling command to get providers of an order.
             //This is a query to the Kademlia DHT.
             //The result is returned through the sender.
             //The sender is stored in a map for later retrieval.
@@ -548,6 +565,9 @@ enum Command {
     ProvideOrder {
         order_details: String,
         sender: oneshot::Sender<()>,
+    },
+    BroadcastOrder {
+        order_details: Vec<u8>,
     },
     ReceiveOrder {
         order_details: String,

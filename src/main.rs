@@ -101,6 +101,13 @@ struct Opt {
     )]
     peer_id_file: Option<String>,
 
+    //
+    #[clap(
+        long,
+        help = "HTTP endpoint where incoming offers are posted to, sends JSON body {\"offer\":\"offer1...\"} (defaults to STDOUT)"
+    )]
+    offer: Option<String>,
+
     /// The address to listen on for incoming connections.
     #[clap(long)]
     listen_address: Option<Multiaddr>,
