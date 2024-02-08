@@ -132,6 +132,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 };
 
                 kademlia.add_address(&peer_id, addr);
+            } else {
+                // Otherwise, use the default bootstrap nodes.
+                for node in BOOTSTRAP_NODES.iter() {
+                    let addr: Multiaddr = format!("/ipfs/{}", node).parse()?;
+                    let Some(Protocol::P2p(peer_id)) = addr.iter().last() else {
+                        return Err("Expect peer multiaddr to contain peer ID.".into());
+                    };
+                    kademlia.add_address(&peer_id, addr);
+                }
             }
 
             // Bootstrap the Kademlia DHT.
@@ -203,6 +212,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     //             ),
     //         },
     //     );
+
+    // Start the warp server using the address provided in the `listen_offer_submission` option.
+    // if let Some(submission_addr_str) = opt.listen_offer_submission {
+    //     let submission_addr: SocketAddr =
+    //         submission_addr_str.parse().expect("Invalid socket address");
+    //     tokio::spawn(async move {
+    //         warp::serve(offer_route).run(submission_addr).await;
+    //     });
+    // }
 
     // Start the Axum server for offer submission if the option is provided.
 
@@ -356,6 +374,12 @@ fn load_keypair_file(file_path: &str) -> io::Result<identity::Keypair> {
     identity::Keypair::from_protobuf_encoding(&keypair_json.identity)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid keypair data"))
 }
+
+const BOOTSTRAP_NODES: [&str; 3] = [
+    "12D3KooWM1So76jzugAettgrfA1jfcaKA66EAE6k1zwAT3oVzcnK",
+    "12D3KooWCLvBXPohyMUKhbRrkcfRRkMLDfnCqyCjNSk6qyfjLMJ8",
+    "12D3KooWP6QDYTCccwfUQVAc6jQDvzVY1FtU3WVsAxmVratbbC5V",
+];
 
 #[derive(Serialize, Deserialize)]
 struct IdentityJson {
