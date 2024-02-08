@@ -135,7 +135,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             } else {
                 // Otherwise, use the default bootstrap nodes.
                 for node in BOOTSTRAP_NODES.iter() {
-                    let addr: Multiaddr = format!("/ipfs/{}", node).parse()?;
+                    let addr: Multiaddr = format!("/p2p/{}", node).parse()?;
                     let Some(Protocol::P2p(peer_id)) = addr.iter().last() else {
                         return Err("Expect peer multiaddr to contain peer ID.".into());
                     };
