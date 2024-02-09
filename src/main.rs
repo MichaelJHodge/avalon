@@ -1,5 +1,5 @@
 // mod network;
-// mod orderbook;
+mod orderbook;
 
 // use async_std::task::spawn;
 // use clap::Parser;
@@ -33,7 +33,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::{io, select, time};
 use tower_http::trace::TraceLayer;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::EnvFilter;
 
 //The main function is the entry point of the program. It is asynchronous,
 //which means it can perform non-blocking operations. It returns a Result type,
@@ -185,43 +185,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         swarm.listen_on("/ip6/::/tcp/0".parse()?)?;
     }
 
-    // // Start the offer submission API if the option is provided.
-    // let offer_tx_clone = offer_tx.clone();
-
-    // //
-    // let offer_route = warp::post()
-    //     .and(warp::body::json())
-    //     .map(
-    //         move |offer: serde_json::Value| match offer.get("offer").and_then(|v| v.as_str()) {
-    //             // Some(offer_str) if offer_str.as_bytes().len() > MAX_OFFER_SIZE => {
-    //             //     warp::reply::with_status("Offer too large", warp::http::StatusCode::BAD_REQUEST)
-    //             // }
-    //             Some(offer_str) if bech32::decode(offer_str).is_ok() => {
-    //                 let offer_bytes = offer_str.as_bytes().to_vec();
-    //                 let tx = offer_tx_clone.clone();
-    //                 tokio::spawn(async move {
-    //                     if tx.send(offer_bytes).await.is_err() {
-    //                         eprintln!("Failed to send offer through the channel");
-    //                     }
-    //                 });
-    //                 warp::reply::with_status("Offer received", warp::http::StatusCode::OK)
-    //             }
-    //             _ => warp::reply::with_status(
-    //                 "Invalid offer format",
-    //                 warp::http::StatusCode::BAD_REQUEST,
-    //             ),
-    //         },
-    //     );
-
-    // Start the warp server using the address provided in the `listen_offer_submission` option.
-    // if let Some(submission_addr_str) = opt.listen_offer_submission {
-    //     let submission_addr: SocketAddr =
-    //         submission_addr_str.parse().expect("Invalid socket address");
-    //     tokio::spawn(async move {
-    //         warp::serve(offer_route).run(submission_addr).await;
-    //     });
-    // }
-
     // Start the Axum server for offer submission if the option is provided.
 
     if let Some(submission_addr_str) = opt.listen_offer_submission {
@@ -233,6 +196,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let mut peer_discovery_interval = time::interval(time::Duration::from_secs(10));
+
+    println!("Entering loop...");
 
     loop {
         select! {
@@ -247,12 +212,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 swarm.behaviour_mut().kademlia.get_closest_peers(PeerId::random());
             },
             event = swarm.select_next_some() => match event {
+                  SwarmEvent::IncomingConnection { .. } => {}
+
                 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                     println!("Connected to peer: {peer_id}");
                 },
+
                 SwarmEvent::ConnectionClosed { peer_id, .. } => {
                     println!("Disconnected from peer: {peer_id}");
                 },
+
                 SwarmEvent::Behaviour(AvalonBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                     propagation_source: _,
                     message_id: _,
@@ -260,14 +229,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 })) => {
                     let data_clone = message.data.clone();
                     let msg_str = String::from_utf8_lossy(&data_clone).into_owned();
+                    println!("Received Offer: {}", msg_str);
 
-                    if msg_str.starts_with("offer1") {
-                        println!(
-                            "Received Offer: {}",
-                            msg_str,
-                        );
-
-                        if let Some(ref endpoint_url) = opt.offer_hook {
+                    if let Some(ref endpoint_url) = opt.offer_hook {
                             let endpoint_url_clone = endpoint_url.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = post_limit_order(&endpoint_url_clone, &msg_str).await {
@@ -275,7 +239,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             });
                         }
-                    }
                 },
                 SwarmEvent::Behaviour(AvalonBehaviourEvent::Identify(identify::Event::Received { info: identify::Info { observed_addr, listen_addrs, .. }, peer_id })) => {
                     for addr in listen_addrs {
@@ -286,9 +249,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     // `libp2p-autonat`.
                     swarm.add_external_address(observed_addr);
                 },
-                SwarmEvent::NewListenAddr { address, .. } => {
-                    println!("Listening on: {address}");
-                },
+                      SwarmEvent::NewListenAddr { address, .. } => {
+                    let local_peer_id = *swarm.local_peer_id();
+                    eprintln!(
+                        "Local node is listening on {:?}",
+                        address.with(Protocol::P2p(local_peer_id))
+                    );
+                }
                 _ => {}
             }
         }
@@ -311,12 +278,6 @@ async fn run_axum_server(
             )
             .layer(TraceLayer::new_for_http());
 
-        tracing_subscriber::registry()
-            .with(tracing_subscriber::EnvFilter::new("info"))
-            .with(tracing_subscriber::fmt::layer())
-            .init();
-
-        println!("Axum server running at {}", submission_addr);
         // Start the Axum server
         let listener = tokio::net::TcpListener::bind(submission_addr)
             .await
@@ -325,6 +286,9 @@ async fn run_axum_server(
         axum::serve(listener, app.into_make_service())
             .await
             .unwrap();
+
+        println!("Axum server running at {}", submission_addr);
+
         // axum::serve::bind(&submission_addr)
         //     .serve(app.into_make_service())
         //     .await?;
@@ -336,6 +300,7 @@ async fn offer_handler(
     Json(payload): Json<LimitOrder>,
     offer_tx_clone: tokio::sync::mpsc::Sender<Vec<u8>>,
 ) -> StatusCode {
+    println!("Received order: {:?}", payload);
     match bech32::decode(&payload.order_details) {
         Ok(_) => {
             let offer_bytes = payload.order_details.as_bytes().to_vec();
@@ -376,7 +341,7 @@ fn load_keypair_file(file_path: &str) -> io::Result<identity::Keypair> {
 }
 
 const BOOTSTRAP_NODES: [&str; 3] = [
-    "12D3KooWM1So76jzugAettgrfA1jfcaKA66EAE6k1zwAT3oVzcnK",
+    "12D3KooWPjceQrSwdWXPyLLeABRXmuqt69Rg3sBYbU1Nft9HyQ6X",
     "12D3KooWCLvBXPohyMUKhbRrkcfRRkMLDfnCqyCjNSk6qyfjLMJ8",
     "12D3KooWP6QDYTCccwfUQVAc6jQDvzVY1FtU3WVsAxmVratbbC5V",
 ];
