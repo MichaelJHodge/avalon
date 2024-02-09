@@ -297,22 +297,30 @@ async fn run_axum_server(
 }
 
 async fn offer_handler(
-    Json(payload): Json<LimitOrder>,
+    Json(payload): Json<String>,
     offer_tx_clone: tokio::sync::mpsc::Sender<Vec<u8>>,
 ) -> StatusCode {
     println!("Received order: {:?}", payload);
-    match bech32::decode(&payload.order_details) {
-        Ok(_) => {
-            let offer_bytes = payload.order_details.as_bytes().to_vec();
-            if offer_tx_clone.send(offer_bytes).await.is_err() {
-                eprintln!("Failed to send offer through the channel");
-                StatusCode::INTERNAL_SERVER_ERROR
-            } else {
-                StatusCode::OK
-            }
-        }
-        Err(_) => StatusCode::BAD_REQUEST,
+    // Directly use the payload string as the offer message
+    let offer_bytes = payload.as_bytes().to_vec();
+    if offer_tx_clone.send(offer_bytes).await.is_err() {
+        eprintln!("Failed to send offer through the channel");
+        StatusCode::INTERNAL_SERVER_ERROR
+    } else {
+        StatusCode::OK
     }
+    // match bech32::decode(&payload.order_details) {
+    //     Ok(_) => {
+    //         let offer_bytes = payload.order_details.as_bytes().to_vec();
+    //         if offer_tx_clone.send(offer_bytes).await.is_err() {
+    //             eprintln!("Failed to send offer through the channel");
+    //             StatusCode::INTERNAL_SERVER_ERROR
+    //         } else {
+    //             StatusCode::OK
+    //         }
+    //     }
+    //     Err(_) => StatusCode::BAD_REQUEST,
+    // }
 }
 
 async fn post_limit_order(endpoint: &str, offer: &str) -> Result<(), reqwest::Error> {
