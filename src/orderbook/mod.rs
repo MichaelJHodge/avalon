@@ -1,4 +1,5 @@
 use ethers::types::{Address, U256};
+use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -23,7 +24,7 @@ pub struct LimitOrder {
     amount: U256,
     price: U256,
     status: OrderStatus,
-    user_id: Address,
+    user_id: PeerId,
     timestamp: i64,
     nonce: U256, // New field for uniqueness
 }
@@ -34,7 +35,7 @@ impl LimitOrder {
         asset: String,
         amount: U256,
         price: U256,
-        user_id: Address,
+        user_id: PeerId,
         nonce: U256, // Added nonce as a parameter
     ) -> Self {
         LimitOrder {
