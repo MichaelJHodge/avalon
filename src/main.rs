@@ -1,29 +1,19 @@
 // mod network;
+mod db;
 mod orderbook;
-
-// use async_std::task::spawn;
-// use clap::Parser;
-
-// use std::error::Error;
-// use tracing_subscriber::EnvFilter;
-// // The network module - responsible for setting up and managing the P2P network.
-
-// // Importing necessary components from libp2p.
-// use libp2p::{
-//     core::Multiaddr,     // Multiaddress for network addresses.
-//     multiaddr::Protocol, // Networking protocols.
-// };
-// use serde::{Deserialize, Serialize}; // For serializing and deserializing data.
 use axum::{extract::Json, http::StatusCode, routing::post, Router};
 use clap::Parser;
+use ethers::types::{Address, U256};
 use futures::stream::StreamExt;
 use libp2p::multiaddr::Protocol;
 use libp2p::{
     autonat, gossipsub, identify, identity, kad, noise, swarm::NetworkBehaviour, swarm::SwarmEvent,
     tcp, yamux, Multiaddr, PeerId, StreamProtocol,
 };
+use orderbook::LimitOrder;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sqlx::SqlitePool;
 use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
 use std::fs::{self, File};
@@ -34,6 +24,8 @@ use std::time::Duration;
 use tokio::{io, select, time};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
+
+use crate::db::insert_offer;
 
 //The main function is the entry point of the program. It is asynchronous,
 //which means it can perform non-blocking operations. It returns a Result type,
@@ -47,6 +39,8 @@ struct AvalonBehaviour {
     pub identify: identify::Behaviour,
     pub autonat: autonat::Behaviour,
 }
+
+const DATABASE_URL: &str = "ckb_limit_order_book.db";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -195,13 +189,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
         });
     }
 
+    let db_pool = db::setup_database(DATABASE_URL)
+        .await
+        .expect("Failed to setup database");
+
     let mut peer_discovery_interval = time::interval(time::Duration::from_secs(10));
 
+    // Get the local peer ID as a string
+    let local_peer_id_str = swarm.local_peer_id();
+
+    // If the send_order flag is set, call the client function
+    if opt.send_order {
+        // If the send_order flag is set, call the client function
+        send_limit_order_from_client(*local_peer_id_str).await?;
+        return Ok(());
+    }
+
     println!("Entering loop...");
+
+    // The main event loop
+    // The loop listens for incoming offers and broadcasts them to the network.
+    // It also listens for network events and logs them to the console.
 
     loop {
         select! {
             Some(offer) = offer_rx.recv() => {
+
                 println!("Broadcasting Offer: {}", String::from_utf8_lossy(&offer));
 
                 if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic.clone(), offer) {
@@ -231,6 +244,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     let msg_str = String::from_utf8_lossy(&data_clone).into_owned();
                     println!("Received Offer: {}", msg_str);
 
+                       // Deserialize JSON string back to LimitOrder
+                    if let Ok(offer) = serde_json::from_str::<LimitOrder>(&msg_str) {
+                        // Assuming you have `db_pool` accessible here, e.g., passed along with the context or globally accessible
+                        match insert_offer(&offer, &db_pool).await {
+                            Ok(_) => println!("Offer inserted into the database successfully."),
+                            Err(e) => eprintln!("Failed to insert offer into the database: {}", e),
+                        }
+                    } else {
+                        eprintln!("Failed to deserialize received offer.");
+                    }
+
+                     // Post the offer to the offer hook if provided in the command line arguments
                     if let Some(ref endpoint_url) = opt.offer_hook {
                             let endpoint_url_clone = endpoint_url.clone();
                             tokio::spawn(async move {
@@ -245,7 +270,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
                     }
                     // Mark the address observed for us by the external peer as confirmed.
-                    // TODO: We shouldn't trust this, instead we should confirm our own address manually or using
+                    // TODO: Confirm our own address manually or using
                     // `libp2p-autonat`.
                     swarm.add_external_address(observed_addr);
                 },
@@ -274,7 +299,7 @@ async fn run_axum_server(
         let app = Router::new()
             .route(
                 "/submit_offer",
-                post(move |json| offer_handler(json, offer_tx.clone())),
+                post(move |json| order_handler(json, offer_tx.clone())),
             )
             .layer(TraceLayer::new_for_http());
 
@@ -296,19 +321,34 @@ async fn run_axum_server(
     Ok(())
 }
 
-async fn offer_handler(
-    Json(payload): Json<String>,
+async fn order_handler(
+    Json(payload): Json<LimitOrder>,
     offer_tx_clone: tokio::sync::mpsc::Sender<Vec<u8>>,
 ) -> StatusCode {
-    println!("Received order: {:?}", payload);
-    // Directly use the payload string as the offer message
-    let offer_bytes = payload.as_bytes().to_vec();
-    if offer_tx_clone.send(offer_bytes).await.is_err() {
-        eprintln!("Failed to send offer through the channel");
-        StatusCode::INTERNAL_SERVER_ERROR
+    //works with String
+    // println!("Received order: {:?}", payload);
+    // // Directly use the payload string as the offer message
+    // let offer_bytes = payload.as_bytes().to_vec();
+    // if offer_tx_clone.send(offer_bytes).await.is_err() {
+    //     eprintln!("Failed to send offer through the channel");
+    //     StatusCode::INTERNAL_SERVER_ERROR
+    // } else {
+    //     StatusCode::OK
+    // }
+
+    // Serialize LimitOrder into JSON and then into bytes
+    if let Ok(offer_bytes) = serde_json::to_vec(&payload) {
+        if offer_tx_clone.send(offer_bytes).await.is_err() {
+            eprintln!("Failed to send offer through the channel");
+            StatusCode::INTERNAL_SERVER_ERROR
+        } else {
+            StatusCode::OK
+        }
     } else {
-        StatusCode::OK
+        StatusCode::BAD_REQUEST
     }
+
+    //Doesnt work right now
     // match bech32::decode(&payload.order_details) {
     //     Ok(_) => {
     //         let offer_bytes = payload.order_details.as_bytes().to_vec();
@@ -328,6 +368,34 @@ async fn post_limit_order(endpoint: &str, offer: &str) -> Result<(), reqwest::Er
 
     let offer_json = json!({ "offer": offer });
     client.post(endpoint).json(&offer_json).send().await?;
+
+    Ok(())
+}
+
+async fn send_limit_order_from_client(node_id: PeerId) -> Result<(), Box<dyn Error>> {
+    print!("Sending limit order from client");
+    let limit_order = LimitOrder::new(
+        orderbook::OrderSide::Buy, // or OrderSide::Sell
+        "ETH".to_string(),
+        U256::from(10),  // amount
+        U256::from(500), // price
+        node_id,         // Replace with a valid Ethereum address
+        U256::from(0),
+    );
+
+    //Serialize the limit order into JSON
+    let json_payload = serde_json::to_string(&limit_order)?;
+
+    //Create HTTP Client and send through the network
+    let client = reqwest::Client::new();
+    let response = client
+        .post("http://localhost:3000/submit_offer")
+        .header("Content-Type", "application/json")
+        .body(json_payload)
+        .send()
+        .await?;
+
+    println!("Response: {:?}", response.text().await?);
 
     Ok(())
 }
@@ -391,17 +459,15 @@ struct Opt {
     )]
     offer_hook: Option<String>,
 
+    #[clap(long, help = "Send a limit order as a client")]
+    send_order: bool,
+
     #[clap(
         long,
         help = "Start a HTTP API for offer submission, expects JSON body {\"offer\":\"offer1...\"}",
         value_name = "HOST:PORT"
     )]
     listen_offer_submission: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LimitOrder {
-    order_details: String,
 }
 
 // #[async_std::main]
