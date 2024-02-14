@@ -26,3 +26,6 @@ axum = "0.7.4"
 tower-http = {version = "0.5.1", features = ["full"]}
 hyper = "1.1.0"
 tower = "0.4.13"
+diesel = "2.1.4"
+sqlx = { version = "0.7.3", features = ["sqlite", "runtime-tokio-rustls"] }
+

@@ -1,19 +1,6 @@
 // mod network;
+mod db;
 mod orderbook;
-
-// use async_std::task::spawn;
-// use clap::Parser;
-
-// use std::error::Error;
-// use tracing_subscriber::EnvFilter;
-// // The network module - responsible for setting up and managing the P2P network.
-
-// // Importing necessary components from libp2p.
-// use libp2p::{
-//     core::Multiaddr,     // Multiaddress for network addresses.
-//     multiaddr::Protocol, // Networking protocols.
-// };
-// use serde::{Deserialize, Serialize}; // For serializing and deserializing data.
 use axum::{extract::Json, http::StatusCode, routing::post, Router};
 use clap::Parser;
 use ethers::types::{Address, U256};
@@ -26,6 +13,7 @@ use libp2p::{
 use orderbook::LimitOrder;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sqlx::SqlitePool;
 use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
 use std::fs::{self, File};
@@ -36,6 +24,8 @@ use std::time::Duration;
 use tokio::{io, select, time};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
+
+use crate::db::insert_offer;
 
 //The main function is the entry point of the program. It is asynchronous,
 //which means it can perform non-blocking operations. It returns a Result type,
@@ -49,6 +39,8 @@ struct AvalonBehaviour {
     pub identify: identify::Behaviour,
     pub autonat: autonat::Behaviour,
 }
+
+const DATABASE_URL: &str = "ckb_limit_order_book.db";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -197,6 +189,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         });
     }
 
+    let db_pool = db::setup_database(DATABASE_URL)
+        .await
+        .expect("Failed to setup database");
+
     let mut peer_discovery_interval = time::interval(time::Duration::from_secs(10));
 
     // Get the local peer ID as a string
@@ -248,6 +244,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     let msg_str = String::from_utf8_lossy(&data_clone).into_owned();
                     println!("Received Offer: {}", msg_str);
 
+                       // Deserialize JSON string back to LimitOrder
+                    if let Ok(offer) = serde_json::from_str::<LimitOrder>(&msg_str) {
+                        // Assuming you have `db_pool` accessible here, e.g., passed along with the context or globally accessible
+                        match insert_offer(&offer, &db_pool).await {
+                            Ok(_) => println!("Offer inserted into the database successfully."),
+                            Err(e) => eprintln!("Failed to insert offer into the database: {}", e),
+                        }
+                    } else {
+                        eprintln!("Failed to deserialize received offer.");
+                    }
+
+                     // Post the offer to the offer hook if provided in the command line arguments
                     if let Some(ref endpoint_url) = opt.offer_hook {
                             let endpoint_url_clone = endpoint_url.clone();
                             tokio::spawn(async move {
@@ -291,7 +299,7 @@ async fn run_axum_server(
         let app = Router::new()
             .route(
                 "/submit_offer",
-                post(move |json| offer_handler(json, offer_tx.clone())),
+                post(move |json| order_handler(json, offer_tx.clone())),
             )
             .layer(TraceLayer::new_for_http());
 
@@ -313,7 +321,7 @@ async fn run_axum_server(
     Ok(())
 }
 
-async fn offer_handler(
+async fn order_handler(
     Json(payload): Json<LimitOrder>,
     offer_tx_clone: tokio::sync::mpsc::Sender<Vec<u8>>,
 ) -> StatusCode {
@@ -381,7 +389,7 @@ async fn send_limit_order_from_client(node_id: PeerId) -> Result<(), Box<dyn Err
     //Create HTTP Client and send through the network
     let client = reqwest::Client::new();
     let response = client
-        .post("http://localhost:4000/submit_offer")
+        .post("http://localhost:3000/submit_offer")
         .header("Content-Type", "application/json")
         .body(json_payload)
         .send()
