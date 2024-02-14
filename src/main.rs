@@ -1,7 +1,7 @@
 // mod network;
 mod db;
 mod orderbook;
-use axum::{extract::Json, http::StatusCode, routing::post, Router};
+use axum::{extract::Json, http::StatusCode, routing::get, routing::post, Router};
 use clap::Parser;
 use ethers::types::{Address, U256};
 use futures::stream::StreamExt;
@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::SqlitePool;
 use std::collections::hash_map::DefaultHasher;
+use std::env;
 use std::error::Error;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
@@ -40,7 +41,7 @@ struct AvalonBehaviour {
     pub autonat: autonat::Behaviour,
 }
 
-const DATABASE_URL: &str = "ckb_limit_order_book.db";
+// const DATABASE_URL: &str = "ckb_limit_order_book.db";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -49,6 +50,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .try_init();
 
     let opt = Opt::parse();
+
+    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
 
     //Create a channel for sending offers to the network.
     //The channel has a buffer size of 100, which means it can hold up to 100 offers
@@ -189,7 +192,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         });
     }
 
-    let db_pool = db::setup_database(DATABASE_URL)
+    let db_pool = db::setup_database(&database_url)
         .await
         .expect("Failed to setup database");
 
@@ -203,6 +206,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
         // If the send_order flag is set, call the client function
         send_limit_order_from_client(*local_peer_id_str).await?;
         return Ok(());
+    }
+
+    // If the fetch_orders flag is set, fetch all orders from the database and print them
+    // if opt.fetch_orders {
+    //     let orders = db::get_all_orders(&db_pool).await?;
+    //     for order in orders.iter() {
+    //         println!("{:?}", order);
+    //     }
+    // }
+
+    // If the get_closest_peers flag is set, get the closest peers to the provided peer ID
+    if let Some(peer_id) = opt.get_closest_peers {
+        // let peer_id = peer_id.unwrap_or_else(|| PeerId::random());
+        // let peer_id = PeerId::random();
+        println!("Searching for the closest peers to {peer_id}");
+        swarm.behaviour_mut().kademlia.get_closest_peers(peer_id);
     }
 
     println!("Entering loop...");
@@ -301,6 +320,7 @@ async fn run_axum_server(
                 "/submit_offer",
                 post(move |json| order_handler(json, offer_tx.clone())),
             )
+            // .route("/get_orders", get(get_orders_handler))
             .layer(TraceLayer::new_for_http());
 
         // Start the Axum server
@@ -362,6 +382,13 @@ async fn order_handler(
     //     Err(_) => StatusCode::BAD_REQUEST,
     // }
 }
+
+// async fn get_orders_handler(db_pool: SqlitePool) -> Result<Json<Vec<LimitOrder>>, StatusCode> {
+//     match db::get_all_orders(&db_pool).await {
+//         Ok(orders) => Ok(Json(orders)),
+//         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+//     }
+// }
 
 async fn post_limit_order(endpoint: &str, offer: &str) -> Result<(), reqwest::Error> {
     let client = reqwest::Client::new();
@@ -468,6 +495,12 @@ struct Opt {
         value_name = "HOST:PORT"
     )]
     listen_offer_submission: Option<String>,
+
+    #[clap(long, help = "Fetch and display all current orders from the database")]
+    fetch_orders: bool,
+
+    #[clap(long, help = "Get closest peers")]
+    get_closest_peers: Option<PeerId>,
 }
 
 // #[async_std::main]
