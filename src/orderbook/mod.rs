@@ -2,6 +2,7 @@ use ethers::types::{Address, U256};
 use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
+use std::fmt::Display;
 use std::{
     fmt,
     time::{SystemTime, UNIX_EPOCH},
@@ -79,12 +80,13 @@ impl LimitOrder {
             nonce,
         }
     }
+}
 
-    pub fn side(&self) -> Option<OrderSide> {
-        match self.side {
-            OrderSide::Buy => Some(OrderSide::Buy),
-            OrderSide::Sell => Some(OrderSide::Sell),
-            _ => None,
+impl Display for OrderSide {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            OrderSide::Buy => write!(f, "Buy"),
+            OrderSide::Sell => write!(f, "Sell"),
         }
     }
 }
