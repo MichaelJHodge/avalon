@@ -34,3 +34,24 @@ pub async fn insert_offer(offer: &LimitOrder, db_pool: &SqlitePool) -> Result<()
         .await?;
     Ok(())
 }
+
+// // Function to fetch all orders from the database
+// pub async fn get_all_orders(db_pool: &SqlitePool) -> Result<Vec<LimitOrder>, sqlx::Error> {
+//     let orders = sqlx::query_as!(LimitOrder, "SELECT * FROM orders")
+//         .fetch_all(db_pool)
+//         .await?;
+
+//     Ok(orders)
+// }
+
+// // Function to fetch all orders from the database
+// pub async fn get_orders(db_pool: &SqlitePool) -> Result<Vec<LimitOrder>, sqlx::Error> {
+//     let orders = sqlx::query_as!(
+//         LimitOrder,
+//         "SELECT id, side, asset, amount, price, status, user_id, timestamp, nonce FROM orders"
+//     )
+//     .fetch_all(db_pool)
+//     .await?;
+
+//     Ok(orders)
+// }
