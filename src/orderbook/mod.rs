@@ -1,7 +1,6 @@
 use ethers::types::{Address, U256};
 use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
 use std::cmp::Ordering;
 use std::fmt::Display;
 use std::{
