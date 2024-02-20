@@ -29,7 +29,7 @@ pub async fn insert_offer(offer: &LimitOrder, db_pool: &SqlitePool) -> Result<()
         .bind(&offer.status.to_string()) // Assuming you also convert OrderStatus to string
         .bind(offer.user_id.to_string()) // Convert PeerId to string
         .bind(offer.timestamp)
-        .bind(offer.nonce.to_string()) // Convert U256 to string
+        // .bind(offer.nonce.to_string()) // Convert U256 to string
         .execute(db_pool)
         .await?;
     Ok(())

@@ -2,6 +2,7 @@ use ethers::types::{Address, U256};
 use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
+use std::cmp::Ordering;
 use std::fmt::Display;
 use std::{
     fmt,
@@ -88,5 +89,29 @@ impl Display for OrderSide {
             OrderSide::Buy => write!(f, "Buy"),
             OrderSide::Sell => write!(f, "Sell"),
         }
+    }
+}
+
+// Define a comparator for LimitOrder that considers price and timestamp
+impl Ord for LimitOrder {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .price
+            .cmp(&self.price) // Higher price first
+            .then_with(|| self.timestamp.cmp(&other.timestamp)) // Earlier timestamp first
+    }
+}
+
+impl PartialOrd for LimitOrder {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Eq for LimitOrder {}
+
+impl PartialEq for LimitOrder {
+    fn eq(&self, other: &Self) -> bool {
+        self.price == other.price && self.timestamp == other.timestamp
     }
 }
